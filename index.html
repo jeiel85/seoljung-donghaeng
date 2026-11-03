@@ -1,0 +1,1161 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>설중동행 雪中同行</title>
+<meta name="description" content="한지 위 먹으로 그린 수묵화가 살아 움직이는 33초 웹 애니메이션. 눈길을 함께 걷는 호랑이와 나그네.">
+<style>
+:root{--paper:#ece4d2;--ink:#1f1c19;--bg:#d8cfbc}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#1b1916}}
+:root[data-theme="dark"]{--bg:#1b1916}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden}
+body{display:flex;align-items:center;justify-content:center;font-family:"Noto Serif KR","Nanum Myeongjo","Batang","AppleMyungjo",serif;color:var(--ink)}
+#stage{position:relative;width:min(100vw,calc(100vh * 16 / 9));aspect-ratio:16/9;background:var(--paper);box-shadow:0 0 48px rgba(40,30,15,.28)}
+#view{width:100%;height:100%;display:block}
+#ui{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.4em;background:var(--paper);transition:opacity 1.2s}
+#ui.hide{opacity:0;pointer-events:none}
+#ui h1{font-weight:400;letter-spacing:.6em;font-size:clamp(18px,3.2vw,42px);margin:0 0 .3em;writing-mode:vertical-rl;opacity:.82}
+button{font:inherit;font-size:clamp(13px,1.3vw,17px);background:none;border:1px solid rgba(31,28,25,.45);padding:.55em 1.7em;letter-spacing:.25em;cursor:pointer;color:var(--ink);border-radius:2px}
+button:hover{background:rgba(31,28,25,.05)}
+button:disabled{opacity:.45;cursor:progress}
+#ui small{font-size:clamp(11px,1vw,13px);opacity:.55;letter-spacing:.12em}
+#again{position:absolute;right:2.4%;top:4%;opacity:0;transition:opacity 1.2s;pointer-events:none}
+#again.show{opacity:.7;pointer-events:auto}
+#err{position:absolute;inset:auto 0 8% 0;text-align:center;font-size:14px;opacity:.7}
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="view"></canvas>
+  <div id="ui"><h1>雪中同行</h1><button id="play" disabled>먹을 가는 중…</button><small>소리와 함께 · 33초</small></div>
+  <button id="again">다시 보기</button>
+  <div id="err"></div>
+</div>
+<script>
+(() => {
+'use strict';
+// ============================================================
+//  설중동행 — 코드로 그린 수묵 애니메이션
+//  레이어: Canvas2D로 먹의 농도를 그리고, WebGL 셰이더에서
+//  한지 질감·번짐·고인 테두리·안개·눈보라를 합성한다.
+// ============================================================
+const Q = new URLSearchParams(location.search);
+const DUR = 33, LW = 1920, LH = 1080, F = 1000, TAU = Math.PI * 2;
+const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
+const lerp = (a, b, t) => a + (b - a) * t;
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const frac = x => x - Math.floor(x);
+function rng(seed) { let a = (seed >>> 0) || 1; return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function ih(x, y) { let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263)) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296; }
+function vn2(x, y) { const ix = Math.floor(x), iy = Math.floor(y), fx = x - ix, fy = y - iy; const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy); const a = ih(ix, iy), b = ih(ix + 1, iy), c = ih(ix, iy + 1), d = ih(ix + 1, iy + 1); return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy; }
+const vn1 = x => vn2(x, 17.31) * 2 - 1;
+function fbm(x, y, o = 4) { let s = 0, a = 0.5, n = 0; for (let i = 0; i < o; i++) { s += a * vn2(x, y); n += a; x = x * 2.03 + 5.1; y = y * 2.03 + 1.7; a *= 0.5; } return s / n; }
+const ridge = (x, y) => 1 - Math.abs(vn2(x, y) * 2 - 1);
+function mkcv(w, h) { const c = document.createElement('canvas'); c.width = Math.max(1, w | 0); c.height = Math.max(1, h | 0); return c; }
+const tcode = tr => Math.round(clamp(tr / 6, 0, 1) * 255) + ',0,0'; // 배경 레이어: R 채널에 '먹이 번지기 시작하는 시각'을 싣는다
+
+// ---------------- 곡선·붓 ----------------
+function cr(p, closed, n) {
+  const L = p.length; if (L < 3) return p.slice();
+  const out = [], get = i => closed ? p[(i + L) % L] : p[clamp(i, 0, L - 1)];
+  const segs = closed ? L : L - 1;
+  for (let i = 0; i < segs; i++) {
+    const p0 = get(i - 1), p1 = get(i), p2 = get(i + 1), p3 = get(i + 2);
+    for (let j = 0; j < n; j++) {
+      const t = j / n, t2 = t * t, t3 = t2 * t;
+      out.push([0.5 * (2 * p1[0] + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3),
+                0.5 * (2 * p1[1] + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)]);
+    }
+  }
+  if (!closed) out.push(p[L - 1]);
+  return out;
+}
+function plen(p) { let l = 0; for (let i = 1; i < p.length; i++) l += Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]); return l; }
+function resamp(p, M) {
+  const cum = [0]; for (let i = 1; i < p.length; i++) cum.push(cum[i - 1] + Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]));
+  const L = cum[cum.length - 1], out = []; let j = 0;
+  for (let i = 0; i < M; i++) {
+    const d = L * i / (M - 1);
+    while (j < cum.length - 2 && cum[j + 1] < d) j++;
+    const seg = cum[j + 1] - cum[j] || 1, u = clamp((d - cum[j]) / seg, 0, 1);
+    out.push([lerp(p[j][0], p[j + 1][0], u), lerp(p[j][1], p[j + 1][1], u)]);
+  }
+  return out;
+}
+const PROF = {
+  swell: s => Math.pow(Math.max(0, Math.sin(Math.PI * clamp(s, 0, 1))), 0.7),
+  nail: s => (s < 0.07 ? 0.7 + 4.3 * s : 1) * (1 - 0.85 * Math.pow(s, 1.3)),
+  press: s => Math.min(1, s * 4 + 0.25) * (1 - 0.7 * Math.pow(s, 1.2)),
+  tail: s => Math.min(1, s * 9 + 0.2) * (1 - 0.92 * s * s),
+  even: s => Math.min(1, s * 7 + 0.35, (1 - s) * 7 + 0.35),
+};
+function ribbon(c, C, nx, ny, w, off, wf, i0, i1, taper) {
+  c.beginPath();
+  for (let i = i0; i <= i1; i++) {
+    const k = taper ? Math.min(1, (i - i0 + 0.6) / 1.8, (i1 - i + 0.6) / 1.8) : 1;
+    const hw = w[i] * wf * k, o = w[i] * off;
+    const x = C[i][0] + nx[i] * (o + hw), y = C[i][1] + ny[i] * (o + hw);
+    i === i0 ? c.moveTo(x, y) : c.lineTo(x, y);
+  }
+  for (let i = i1; i >= i0; i--) {
+    const k = taper ? Math.min(1, (i - i0 + 0.6) / 1.8, (i1 - i + 0.6) / 1.8) : 1;
+    const hw = w[i] * wf * k, o = w[i] * off;
+    c.lineTo(C[i][0] + nx[i] * (o - hw), C[i][1] + ny[i] * (o - hw));
+  }
+  c.closePath();
+}
+// 붓질: 굵기 변화(필압) + 붓털 갈래 + 마른 붓 끊김. 같은 seed면 언제나 같은 획.
+function brush(c, pts, o) {
+  if (!pts || pts.length < 2) return;
+  const sp = pts.length > 2 ? cr(pts, false, 5) : pts;
+  const L = plen(sp); if (L < 0.4) return;
+  const M = Math.max(5, Math.min(110, Math.round(L / 2.5)));
+  const C = resamp(sp, M);
+  const nx = new Float32Array(M), ny = new Float32Array(M), w = new Float32Array(M);
+  const R = rng(o.seed || 7), ph = R() * 97, prof = o.prof || PROF.swell, wob = o.wob ?? 0.14, mn = o.min ?? 0.35;
+  for (let i = 0; i < M; i++) {
+    const a = C[Math.max(0, i - 1)], b = C[Math.min(M - 1, i + 1)];
+    const tx = b[0] - a[0], ty = b[1] - a[1], l = Math.hypot(tx, ty) || 1;
+    nx[i] = -ty / l; ny[i] = tx / l;
+    const s = i / (M - 1);
+    w[i] = Math.max(mn, o.w * prof(s) * (1 + wob * vn1(ph + s * 4.3)));
+  }
+  const col = o.col || '0,0,0', A = o.a ?? 0.9;
+  const nb = (o.br && o.w > 1.8) ? o.br : 0;
+  if (!nb) { c.fillStyle = `rgba(${col},${A})`; ribbon(c, C, nx, ny, w, 0, 1, 0, M - 1, 0); c.fill(); return; }
+  c.fillStyle = `rgba(${col},${A * 0.5})`; ribbon(c, C, nx, ny, w, 0, 0.8, 0, M - 1, 1); c.fill();
+  const dry = o.dry ?? 0.4;
+  for (let b = 0; b < nb; b++) {
+    const off = ((b + 0.5) / nb * 2 - 1) * 0.84 + (R() - 0.5) * 0.3 / nb;
+    const bw = 1.35 / nb * (0.7 + 0.6 * R());
+    const end = 1 - dry * R() * 0.55, gp = R() * 300, ga = A * (0.45 + 0.4 * R());
+    let st = -1;
+    for (let i = 0; i <= M; i++) {
+      const s = i / (M - 1);
+      const on = i < M && s <= end && vn1(gp + s * 9) > -1 + 1.7 * dry * Math.pow(s, 1.4);
+      if (on && st < 0) st = i;
+      if (!on && st >= 0) { if (i - st >= 2) { c.fillStyle = `rgba(${col},${ga})`; ribbon(c, C, nx, ny, w, off, bw, st, i - 1, 1); c.fill(); } st = -1; }
+    }
+  }
+}
+function polyPath(c, pts, closed = true, smooth = true) {
+  const q = smooth ? cr(pts, closed, 6) : pts;
+  c.beginPath(); c.moveTo(q[0][0], q[0][1]);
+  for (let i = 1; i < q.length; i++) c.lineTo(q[i][0], q[i][1]);
+  if (closed) c.closePath();
+}
+function fillPoly(c, pts, style) { polyPath(c, pts); c.fillStyle = style; c.fill(); }
+function gradPoly(c, pts, x0, y0, x1, y1, stops) { polyPath(c, pts); const g = c.createLinearGradient(x0, y0, x1, y1); for (const [p, s] of stops) g.addColorStop(clamp(p, 0, 1), s); c.fillStyle = g; c.fill(); }
+function boxBlur(src, W, H, r) {
+  const a = Float32Array.from(src), b = new Float32Array(W * H), n = 2 * r + 1;
+  for (let it = 0; it < 2; it++) {
+    for (let j = 0; j < H; j++) { const row = j * W; let acc = 0; for (let i = -r; i <= r; i++) acc += a[row + clamp(i, 0, W - 1)]; for (let i = 0; i < W; i++) { b[row + i] = acc / n; acc += a[row + Math.min(W - 1, i + r + 1)] - a[row + Math.max(0, i - r)]; } }
+    for (let i = 0; i < W; i++) { let acc = 0; for (let j = -r; j <= r; j++) acc += b[clamp(j, 0, H - 1) * W + i]; for (let j = 0; j < H; j++) { a[j * W + i] = acc / n; acc += b[Math.min(H - 1, j + r + 1) * W + i] - b[Math.max(0, j - r) * W + i]; } }
+  }
+  return a;
+}
+const lnorm = (a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1; return [-dy / l, dx / l]; };
+const avgN = (a, b) => { const x = a[0] + b[0], y = a[1] + b[1], l = Math.hypot(x, y) || 1; return [x / l, y / l]; };
+const ad = (p, n, s) => [p[0] + n[0] * s, p[1] + n[1] * s];
+const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+function ik2(a, b, l1, l2, bend) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], d = Math.max(1e-6, Math.hypot(dx, dy));
+  const s = d > (l1 + l2) * 0.999 ? d / ((l1 + l2) * 0.999) : 1; // 닿지 않으면 뼈를 미세하게 늘린다 — 발은 절대 미끄러지지 않는다
+  const L1 = l1 * s, L2 = l2 * s, ax = (L1 * L1 - L2 * L2 + d * d) / (2 * d), h = Math.sqrt(Math.max(0, L1 * L1 - ax * ax));
+  const ux = dx / d, uy = dy / d;
+  return [a[0] + ux * ax - uy * h * bend, a[1] + uy * ax + ux * h * bend];
+}
+
+// ---------------- 시간축 ----------------
+const SR = 240, T0 = -40, T1 = DUR + 1, NS = Math.ceil((T1 - T0) * SR) + 2;
+const tOf = i => T0 + i / SR;
+function samp(a, t) { const f = clamp((t - T0) * SR, 0, NS - 1.001), i = f | 0, u = f - i; return a[i] + (a[i + 1] - a[i]) * u; }
+function speedTiger(t) { if (t < 16.6) return 1.0; if (t < 17.9) return 0.5 * (1 + Math.cos(Math.PI * (t - 16.6) / 1.3)); if (t < 27.0) return 0; if (t < 28.2) return 0.5 * (1 - Math.cos(Math.PI * (t - 27.0) / 1.2)); return 1.0; }
+function speedTrav(t) {
+  if (t < 15) return 1.0; if (t < 16) return lerp(1.0, 0.65, sstep(15, 16, t)); if (t < 19.9) return 0.65;
+  if (t < 21.4) return 0.65 * 0.5 * (1 + Math.cos(Math.PI * (t - 19.9) / 1.5)); if (t < 27.6) return 0;
+  if (t < 28.8) return 0.95 * 0.5 * (1 - Math.cos(Math.PI * (t - 27.6) / 1.2)); return 0.95;
+}
+function track(vf) { const X = new Float64Array(NS), V = new Float32Array(NS); let x = 0; for (let i = 0; i < NS; i++) { V[i] = vf(tOf(i)); if (i) x += (V[i] + V[i - 1]) * 0.5 / SR; X[i] = x; } return { X, V }; }
+const TT = track(speedTiger), MT = track(speedTrav);
+{ const o = samp(TT.X, 0); for (let i = 0; i < NS; i++) TT.X[i] -= o; }
+const T_STOP = samp(TT.X, 22);
+{ const o = (T_STOP - 2.8) - samp(MT.X, 22); for (let i = 0; i < NS; i++) MT.X[i] += o; }
+const M_STOP = samp(MT.X, 22);
+const MED_X = (T_STOP + M_STOP) / 2 + 0.12;
+const XT = t => samp(TT.X, t), XM = t => samp(MT.X, t);
+
+function windAt(t) {
+  let w = 0.15 + 0.04 * Math.sin(t * 0.7) + 0.06 * Math.max(0, vn1(t * 0.9 + 3.3));
+  w += 0.85 * sstep(21.6, 23.4, t) * (1 - sstep(25.8, 27.6, t));
+  w += 0.6 * sstep(28.4, 30.0, t);
+  return clamp(w, 0, 1.1);
+}
+const blizAt = t => clamp(0.8 * sstep(22.4, 23.7, t) * (1 - sstep(25.6, 27.0, t)) + 0.95 * sstep(28.6, 30.4, t), 0, 1);
+
+// ---------------- 보행: 발이 땅에 닿아 있는 동안 세계 좌표가 고정되는 스텝 시뮬레이션 ----------------
+function simGait(TR, cfg) {
+  const X = TR.X, V = TR.V, legs = cfg.legs.map(L => ({ ...L, ev: [], px: X[0] + L.home, px0: X[0] + L.home, swing: null, lift: cfg.lift }));
+  const Xt = t => samp(X, t), Vt = t => samp(V, t), G = new Float32Array(NS);
+  const rateOf = v => v > 0.004 ? Math.max(v / cfg.stride(v), cfg.minRate) : cfg.minRate;
+  let g = 0;
+  for (let i = 0; i < NS; i++) {
+    const t = tOf(i), v = V[i];
+    for (const L of legs) if (L.swing && t >= L.swing.t1) { L.px = L.swing.x1; L.swing = null; }
+    let anySw = false, uns = false;
+    for (const L of legs) { if (L.swing) anySw = true; else if (Math.abs(L.px - (X[i] + L.home)) > cfg.tol) uns = true; }
+    const active = v > 0.004 || anySw || uns, rate = active ? rateOf(v) : 0, g2 = g + rate / SR;
+    if (rate > 0) for (const L of legs) {
+      const p1 = frac(g + L.off), p2 = frac(g2 + L.off);
+      if (p2 < p1 && !L.swing) {
+        const t1 = t + cfg.sw / rate, home1 = Xt(t1) + L.home, v1 = Vt(t1);
+        const lead = v1 > 0.004 ? 0.5 * (1 - cfg.sw) * v1 / rateOf(v1) : 0;
+        if (v < 0.01 && v1 < 0.01 && Math.abs(L.px - home1) < cfg.tol) continue;
+        const e = { t0: t, t1, x0: L.px, x1: home1 + lead };
+        e.r0 = (e.x0 - (Xt(t) + L.home)) / cfg.leadRef; e.r1 = (e.x1 - home1) / cfg.leadRef;
+        L.swing = e; L.ev.push(e);
+      }
+    }
+    g = g2; G[i] = g;
+  }
+  for (const L of legs) L.leadRef = cfg.leadRef;
+  return { legs, G };
+}
+function footAt(L, t, Xf) {
+  const ev = L.ev; let lo = 0, hi = ev.length - 1, idx = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (ev[m].t0 <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
+  if (idx < 0) return { x: L.px0, y: 0, s: -1, rel: (L.px0 - (Xf(t) + L.home)) / L.leadRef };
+  const e = ev[idx];
+  if (t < e.t1) {
+    const s = (t - e.t0) / (e.t1 - e.t0), xe = 0.5 - 0.5 * Math.cos(Math.PI * s);
+    const h = L.lift * clamp(Math.abs(e.x1 - e.x0) / 0.45, 0.3, 1);
+    return { x: e.x0 + (e.x1 - e.x0) * xe, y: h * Math.sin(Math.PI * Math.pow(s, 0.8)), s, e, rel: lerp(e.r0, e.r1, xe) };
+  }
+  return { x: e.x1, y: 0, s: -1, e, rel: (e.x1 - (Xf(t) + L.home)) / L.leadRef };
+}
+const TGAIT = simGait(TT, { legs: [{ off: 0, home: -0.6, z: -0.12, name: 'LH' }, { off: 0.75, home: 0.54, z: -0.12, name: 'LF' }, { off: 0.5, home: -0.6, z: 0.12, name: 'RH' }, { off: 0.25, home: 0.54, z: 0.12, name: 'RF' }],
+  sw: 0.38, stride: v => 0.75 + 0.35 * Math.min(v, 1), minRate: 0.6, tol: 0.06, leadRef: 0.341, lift: 0.1 });
+const MGAIT = simGait(MT, { legs: [{ off: 0, home: 0.02, z: -0.09, name: 'L' }, { off: 0.5, home: 0.02, z: 0.09, name: 'R' }],
+  sw: 0.4, stride: v => 0.55 + 0.5 * v, minRate: 0.55, tol: 0.05, leadRef: 0.315, lift: 0.1 });
+
+// 이차 운동(어깨뼈·엉덩이 솟음, 옷자락·갓끈·술의 지연)은 미리 시뮬레이션해 둔다
+function lowpass(a, tau) { const k = 1 - Math.exp(-1 / (SR * tau)); let y = a[0]; for (let i = 0; i < a.length; i++) { y += (a[i] - y) * k; a[i] = y; } for (let i = a.length - 1, y2 = a[a.length - 1]; i >= 0; i--) { y2 += (a[i] - y2) * k; a[i] = y2; } return a; }
+const TB = TGAIT.legs.map(L => { const a = new Float32Array(NS); for (let i = 0; i < NS; i++) { const f = footAt(L, tOf(i), XT); if (f.s >= 0) { a[i] = 0; continue; } const u = (1 - clamp(f.rel, -1, 1)) / 2; a[i] = Math.pow(Math.sin(Math.PI * Math.pow(u, 0.85)), 2); } return lowpass(a, 0.05); });
+const TRS = (() => {
+  const n = NS, o = {}; for (const k of ['hemF', 'hemB', 'str', 'tas', 'slv', 'bob', 'sash']) o[k] = new Float32Array(n);
+  const st = { hemF: [0, 0], hemB: [0, 0], str: [0, 0], tas: [0, 0], slv: [0, 0], sash: [0, 0] };
+  const dt = 1 / SR, spring = (k, tg, K, C) => { const s = st[k]; const a = K * (tg - s[0]) - C * s[1]; s[1] += a * dt; s[0] += s[1] * dt; o[k][o._i] = s[0]; };
+  const G = MGAIT.G;
+  for (let i = 0; i < n; i++) {
+    o._i = i; const t = tOf(i), w = windAt(Math.max(0, t)), v = MT.V[i], X = MT.X[i];
+    const fL = footAt(MGAIT.legs[0], t, XM), fR = footAt(MGAIT.legs[1], t, XM);
+    const rL = (fL.x - X) / 0.32, rR = (fR.x - X) / 0.32, mx = Math.max(rL, rR), mn = Math.min(rL, rR);
+    spring('hemF', 0.03 + 0.07 * clamp(mx, 0, 1.3) - 0.07 * w, 55, 7);
+    spring('hemB', -0.05 - 0.05 * clamp(-mn, 0, 1.3) - 0.3 * Math.pow(w, 1.2) - 0.04 * v, 30, 4);
+    spring('str', 0.2 * v + 1.2 * Math.pow(w, 1.1), 16, 2.6);
+    spring('tas', 0.28 * v + 0.9 * w, 22, 2.2);
+    spring('slv', -0.04 * v - 0.14 * w, 28, 4);
+    spring('sash', 0.15 * v + 0.8 * w, 18, 2.5);
+    o.bob[i] = -0.02 * Math.min(1, v / 0.5) * (0.5 + 0.5 * Math.cos(2 * TAU * (G[i] - 0.4)));
+  }
+  lowpass(o.bob, 0.04); delete o._i; return o;
+})();
+
+// ---------------- 카메라 ----------------
+function smoothRamp(t, a, b) { if (t <= a) return 0; const d = b - a; if (t >= b) return d / 2 + (t - b); const u = (t - a) / d; return d * (u * u * u - u * u * u * u / 2); }
+function blendCam(a, b, w) { if (w <= 0) return a; if (w >= 1) return b; return { x: lerp(a.x, b.x, w), D: Math.exp(lerp(Math.log(a.D), Math.log(b.D), w)), y: lerp(a.y, b.y, w), hy: lerp(a.hy, b.hy, w) }; }
+function camAt(t) {
+  const xt = XT(t), xm = XM(t);
+  let c = { x: 4.6 + 0.2 * t, D: 42, y: 13, hy: 392 };
+  c = blendCam(c, { x: (xt + xm) / 2 + 0.35, D: 5.2, y: 2.7, hy: 360 }, sstep(5.0, 9.2, t));
+  c = blendCam(c, { x: xt + 0.25, D: 2.0, y: 0.95, hy: 455 }, sstep(14.6, 16.9, t));
+  c = blendCam(c, { x: MED_X, D: 4.0, y: 2.1, hy: 362 }, sstep(19.6, 21.6, t));
+  if (t > 27.4) c = { x: MED_X + 0.6 * smoothRamp(t, 27.4, 29.2), D: 4.0 + 1.2 * sstep(27.4, 31, t), y: 2.1 + 0.2 * sstep(27.4, 31, t), hy: 362 };
+  return c;
+}
+function proj(cam, x, y, z) { const k = F / (cam.D + z); return [960 + k * (x - cam.x), cam.hy + k * (cam.y - y)]; }
+
+// ============================================================
+//  배경 스프라이트 생성 (먹 농도 + 번지기 시각 지도)
+// ============================================================
+function encodeSprite(cv, t0, t1, seed, rimK = 1.2) {
+  const W = cv.width, H = cv.height, c = cv.getContext('2d', { willReadFrequently: true });
+  const id = c.getImageData(0, 0, W, H), d = id.data, A = new Float32Array(W * H);
+  for (let k = 0; k < W * H; k++) A[k] = d[k * 4 + 3] / 255;
+  return encodeArr(c, id, A, W, H, t0, t1, seed, rimK);
+}
+function encodeArr(c, id, A, W, H, t0, t1, seed, rimK) {
+  const d = id.data, B = boxBlur(A, W, H, 2), Bw = boxBlur(A, W, H, 10);
+  for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+    const k = j * W + i, a = A[k], rim = Math.max(0, a - B[k]);
+    const a2 = Math.min(1, Math.max(a + rim * rimK, B[k] * 0.3));
+    const tr = t0 + (t1 - t0) * clamp(0.55 * (1 - Math.min(1, Bw[k] * 2.2)) + 0.45 * vn2(i * 0.011 + seed, j * 0.011), 0, 1);
+    d[k * 4] = Math.round(tr / 6 * 255); d[k * 4 + 1] = 0; d[k * 4 + 2] = 0; d[k * 4 + 3] = Math.round(a2 * 255);
+  }
+  c.putImageData(id, 0, 0);
+  return c.canvas;
+}
+function mips(cv) { const out = [cv]; let c = cv; while (c.width > 96 && out.length < 4) { const n = mkcv(c.width / 2, c.height / 2), x = n.getContext('2d'); x.imageSmoothingQuality = 'high'; x.drawImage(c, 0, 0, n.width, n.height); out.push(n); c = n; } return out; }
+function pickMip(m, dw) { let i = 0; while (i < m.length - 1 && m[i + 1].width >= dw * 1.05) i++; return m[i]; }
+
+// 산맥: 눈 덮인 양지는 종이 여백으로 두고, 그늘진 비탈(능선 오른편)에만 준법 같은 먹을 쓴다
+function makeRange(o) {
+  const W = Math.round((o.x1 - o.x0) * o.ppm), H = Math.round(o.top * o.ppm), R = rng(o.seed);
+  const ms = o.masses.map(m => {
+    const s = new Float32Array(W), sd = R() * 100;
+    for (let i = 0; i < W; i++) {
+      const x = o.x0 + (i + 0.5) / o.ppm, dx = (x - m.x) / m.w, ad_ = Math.sqrt(dx * dx + 0.004);
+      if (ad_ >= 1) { s[i] = 0; continue; }
+      let h = m.h * Math.pow(1 - ad_, m.p || 1.25);
+      h *= 1 + 0.3 * (fbm(x / m.w * 2.6 + sd, 0.5, 3) - 0.5);
+      h += m.h * (m.j ?? 0.05) * (ridge(x / m.w * 13 + sd, 3.3) - 0.5) * Math.min(1, h / m.h * 1.6);
+      s[i] = Math.max(0, h);
+    }
+    return { ...m, s, sd };
+  });
+  const topS = new Float32Array(W); for (let i = 0; i < W; i++) { let t = 0; for (const m of ms) t = Math.max(t, m.s[i]); topS[i] = t; }
+  // 하늘 바림은 능선을 크게 뭉갠 높이를 기준으로 감쇠시킨다 (열마다 다르면 세로 줄이 생긴다)
+  const skyBase = boxBlur(topS, W, 1, Math.max(4, Math.round(W / 40)));
+  const A = new Float32Array(W * H), OC = new Float32Array(W * H);
+  for (let j = 0; j < H; j++) {
+    const y = o.top - (j + 0.5) / o.ppm;
+    for (let i = 0; i < W; i++) {
+      const x = o.x0 + (i + 0.5) / o.ppm; let own = -1;
+      for (let m = ms.length - 1; m >= 0; m--) if (y < ms[m].s[i]) { own = m; break; }
+      let d = 0, oc = 0;
+      if (own < 0) {
+        if (o.sky && y > topS[i]) { const ab = Math.max(0, y - skyBase[i]); d = (o.sky.a * Math.exp(-ab / o.sky.fall) + o.sky.b) * (0.85 + 0.3 * fbm(x / o.sky.nx, y / o.sky.ny, 3)); }
+      } else {
+        const m = ms[own], q = m.s[i] - y, qn = q / m.h;
+        const ux = (x - m.x) / (m.w * 0.08 + q * 0.8), fq = m.f || 1.3, v = qn * 1.1 + m.sd;
+        const rl = ridge((ux - 0.03) * fq + m.sd, v), rr = ridge((ux + 0.03) * fq + m.sd, v);
+        const der = (rr - rl) / 0.06;
+        const sh = Math.pow(sstep(0.25, 1.4, -der * fq * 0.5), 0.9);
+        const flank = sstep(-0.05, 0.55, (x - m.x) / m.w);
+        const crest = Math.exp(-q / (m.h * 0.025 + 0.5)) * flank;
+        let dens = Math.max(sh * lerp(0.2, 1, flank), crest * 0.8) + flank * 0.1 * sstep(0.45, 0.8, vn2(ux * 5 + m.sd, qn * 1.5));
+        const streak = 0.45 + 0.55 * vn2(ux * 26 + m.sd, qn * 1.0), fib = 0.7 + 0.3 * vn2(ux * 120, qn * 2.2);
+        dens *= streak * fib * o.ink;
+        const mist = 1 - sstep(m.f0 ?? o.f0, m.f1 ?? o.f1, qn + 0.3 * (fbm(x / (m.w * 0.2) + m.sd, y / (m.h * 0.25), 3) - 0.5));
+        d = dens * mist; oc = mist;
+      }
+      A[j * W + i] = clamp(d, 0, 1); OC[j * W + i] = clamp(oc, 0, 1);
+    }
+  }
+  const ink = mkcv(W, H), ic = ink.getContext('2d', { willReadFrequently: true }), id = ic.createImageData(W, H);
+  encodeArr(ic, id, A, W, H, o.t0, o.t1, o.seed % 97, 1.3);
+  // 능선 위 나무 점(태점)·작은 소나무
+  if (o.dots) {
+    const DR = rng(o.seed + 5);
+    for (let n = 0; n < o.dots.n; n++) {
+      const m = ms[Math.floor(DR() * ms.length)], xi = clamp(Math.round((m.x + (DR() * 2 - 1) * m.w * 0.85 - o.x0) * o.ppm), 0, W - 1);
+      if (m.s[xi] < m.h * 0.2) continue;
+      let front = true; for (const m2 of ms) if (m2 !== m && ms.indexOf(m2) > ms.indexOf(m) && m2.s[xi] > m.s[xi] - m.h * 0.05) front = false;
+      if (!front) continue;
+      const cx = xi, cy = (o.top - m.s[xi]) * o.ppm + DR() * o.dots.dep * o.ppm, tr = o.t0 + (o.t1 - o.t0) * (0.4 + 0.6 * DR());
+      const cnt = 2 + Math.floor(DR() * 5);
+      for (let k = 0; k < cnt; k++) {
+        const px = cx + (DR() - 0.5) * o.dots.spread, py = cy + (DR() - 0.2) * o.dots.spread * 0.4, r = o.dots.r * (0.6 + 0.8 * DR());
+        if (o.dots.tree) {
+          brush(ic, [[px, py + r * 1.8], [px + r * 0.1, py - r * 1.6]], { w: r * 0.18, prof: PROF.tail, a: 0.7, col: tcode(tr), seed: (DR() * 1e6) | 0 });
+          for (let l = 0; l < 3; l++) { const yy = py - r * 1.1 + l * r * 0.9, ww = r * (0.6 + l * 0.35); brush(ic, [[px - ww, yy + r * 0.15], [px, yy - r * 0.15], [px + ww, yy + r * 0.2]], { w: r * 0.32, prof: PROF.swell, a: 0.75, col: tcode(tr), seed: (DR() * 1e6) | 0 }); }
+        } else { ic.fillStyle = `rgba(${tcode(tr)},${0.55 + 0.35 * DR()})`; ic.beginPath(); ic.ellipse(px, py, r, r * (0.6 + 0.5 * DR()), DR() * 3, 0, TAU); ic.fill(); }
+      }
+    }
+  }
+  const occ = mkcv(W, H), oc2 = occ.getContext('2d'), od = oc2.createImageData(W, H);
+  for (let k = 0; k < W * H; k++) od.data[k * 4 + 3] = Math.round(OC[k] * 255);
+  oc2.putImageData(od, 0, 0);
+  return { ink: mips(ink), occ: mips(occ), x0: o.x0, top: o.top, wm: W / o.ppm, hm: H / o.ppm, z: o.z };
+}
+
+// 소나무: 비틀린 줄기, 마른 붓 껍질, 아래는 먹 위는 눈(여백)인 솔잎 덩어리
+function makePine(seed, Hm, ppm, t0, t1) {
+  const R = rng(seed), sc = Hm / 9;
+  const W = Math.ceil(Hm * 1.45 * ppm), Hc = Math.ceil(Hm * 1.12 * ppm);
+  const ink = mkcv(W, Hc), c = ink.getContext('2d', { willReadFrequently: true }), occ = mkcv(W, Hc), o = occ.getContext('2d');
+  const bx = W * 0.5, by = Hc - Hm * 0.04 * ppm, M = (x, y) => [bx + x * ppm, by - y * ppm];
+  const lean = (R() - 0.5) * 0.7, tp = [], n = 9; let x = 0, y = 0, a = Math.PI / 2 - lean * 0.5;
+  for (let i = 0; i <= n; i++) { tp.push([x, y]); const st = Hm * 0.8 / n; a += (R() - 0.5) * 0.36 + (Math.PI / 2 - lean - a) * 0.16; x += Math.cos(a) * st; y += Math.sin(a) * st; }
+  const tw = i => lerp(0.34, 0.08, i / n) * sc, left = [], right = [];
+  for (let i = 0; i <= n; i++) { const nn = lnorm(tp[Math.max(0, i - 1)], tp[Math.min(n, i + 1)]); left.push(M(...ad(tp[i], nn, tw(i)))); right.push(M(...ad(tp[i], nn, -tw(i)))); }
+  const trunk = [...left, ...right.slice().reverse()];
+  fillPoly(o, trunk, '#000');
+  gradPoly(c, trunk, left[0][0], 0, right[0][0], 0, [[0, 'rgba(0,0,0,0.08)'], [0.6, 'rgba(0,0,0,0.2)'], [1, 'rgba(0,0,0,0.42)']]);
+  brush(c, left, { w: 0.045 * sc * ppm, prof: PROF.press, a: 0.75, br: 5, dry: 0.75, seed: (R() * 1e6) | 0 });
+  brush(c, right, { w: 0.07 * sc * ppm, prof: PROF.nail, a: 0.9, br: 6, dry: 0.6, seed: (R() * 1e6) | 0 });
+  for (let b = 0; b < 16; b++) {
+    const fi = R() * n * 0.92, i0 = Math.min(n - 1, fi | 0), u = fi - i0, p = [lerp(tp[i0][0], tp[i0 + 1][0], u), lerp(tp[i0][1], tp[i0 + 1][1], u)], w = tw(fi), ox = (R() - 0.35) * 1.3 * w;
+    brush(c, [M(p[0] + ox - w * 0.28, p[1] + 0.03 * sc), M(p[0] + ox, p[1] - 0.035 * sc), M(p[0] + ox + w * 0.3, p[1] + 0.025 * sc)], { w: 0.017 * sc * ppm, prof: PROF.swell, a: 0.6, seed: (R() * 1e6) | 0 });
+  }
+  const clusters = [], nb = 4 + ((R() * 3) | 0);
+  for (let b = 0; b < nb; b++) {
+    const fh = 0.42 + 0.5 * (b + R() * 0.6) / nb, fi = fh * n, i0 = Math.min(n - 1, fi | 0), u = fi - i0;
+    const p = [lerp(tp[i0][0], tp[i0 + 1][0], u), lerp(tp[i0][1], tp[i0 + 1][1], u)];
+    const side = (b % 2 ? 1 : -1) * (R() < 0.82 ? 1 : -1), len = (1.3 + 1.8 * R()) * sc * (1.15 - fh * 0.5);
+    const pts = [p]; let ang = (side > 0 ? 0.28 : Math.PI - 0.28) + (R() - 0.5) * 0.4, q = [...p];
+    for (let s = 0; s < 4; s++) { ang += side * -0.13 + (R() - 0.5) * 0.4; q = [q[0] + Math.cos(ang) * len / 4, q[1] + Math.sin(ang) * len / 4 - 0.04 * sc]; pts.push(q); }
+    const bw = 0.065 * sc * ppm * (1.25 - fh * 0.6);
+    brush(c, pts.map(z => M(z[0], z[1])), { w: bw, prof: PROF.tail, a: 0.88, br: 4, dry: 0.5, seed: (R() * 1e6) | 0 });
+    brush(o, pts.map(z => M(z[0], z[1])), { w: bw, prof: PROF.tail, a: 1, seed: 3 });
+    clusters.push({ x: q[0], y: q[1] + 0.1 * sc, rx: (0.8 + 0.7 * R()) * sc, ry: (0.3 + 0.18 * R()) * sc });
+    if (R() < 0.65) { const m2 = pts[2]; clusters.push({ x: m2[0], y: m2[1] + 0.14 * sc, rx: (0.55 + 0.5 * R()) * sc, ry: (0.26 + 0.14 * R()) * sc }); }
+  }
+  clusters.push({ x: tp[n][0], y: tp[n][1] + 0.1 * sc, rx: (0.95 + 0.5 * R()) * sc, ry: (0.38 + 0.2 * R()) * sc });
+  for (const cl of clusters) drawCluster(c, o, cl, M, ppm, sc, R);
+  // 밑동의 눈 둔덕
+  brush(c, [M(-1.1 * sc, 0.02), M(-0.3 * sc, 0.12 * sc), M(0.5 * sc, 0.1 * sc), M(1.3 * sc, 0.0)], { w: 0.05 * sc * ppm, prof: PROF.swell, a: 0.3, br: 5, dry: 0.7, seed: (R() * 1e6) | 0 });
+  fillPoly(o, [M(-1.2 * sc, 0), M(-0.4 * sc, 0.15 * sc), M(0.6 * sc, 0.13 * sc), M(1.4 * sc, 0), M(0, -0.05)], '#000');
+  encodeSprite(ink, t0, t1, seed % 53);
+  return { ink: mips(ink), occ: mips(occ), wm: W / ppm, hm: Hc / ppm, bx: 0.5 * W / ppm, by: (Hc - by) / ppm };
+}
+// 솔잎 덩어리: 눈이 얹힌 윗선(여백)에서 아래로 부채꼴 솔잎이 퍼진다
+function drawCluster(c, o, cl, M, ppm, sc, R) {
+  const nf = Math.max(3, Math.round(cl.rx / sc * 3.2)), hubs = [];
+  for (let f = 0; f < nf; f++) { const u = (f + 0.5) / nf * 2 - 1; hubs.push([cl.x + u * cl.rx * 0.85 + (R() - 0.5) * 0.12 * sc, cl.y + cl.ry * 0.35 * (1 - u * u) + (R() - 0.5) * 0.08 * sc]); }
+  // 눈 더미: 허브 위로 낮고 울퉁불퉁하게 얹힌다
+  const capTop = hubs.map((h, i) => [h[0] + (R() - 0.5) * 0.05 * sc, h[1] + cl.ry * (0.22 + 0.22 * R()) * (i === 0 || i === hubs.length - 1 ? 0.55 : 1)]);
+  const occ = [M(hubs[0][0] - 0.12 * sc, hubs[0][1] - 0.02 * sc), ...capTop.map(p => M(p[0], p[1])), M(hubs[hubs.length - 1][0] + 0.12 * sc, hubs[hubs.length - 1][1] - 0.02 * sc)];
+  for (let i = hubs.length - 1; i >= 0; i--) occ.push(M(hubs[i][0], hubs[i][1] - cl.ry * 1.1));
+  fillPoly(o, occ, '#000');
+  brush(c, [M(hubs[0][0] - 0.12 * sc, hubs[0][1] - 0.02 * sc), ...capTop.map(p => M(p[0], p[1])), M(hubs[hubs.length - 1][0] + 0.12 * sc, hubs[hubs.length - 1][1] - 0.02 * sc)], { w: 0.012 * sc * ppm, prof: PROF.swell, a: 0.32, br: 3, dry: 0.7, seed: (R() * 1e6) | 0 });
+  // 아래쪽 옅은 바림 (덩어리의 그늘)
+  const sh = []; for (const h of hubs) sh.push(M(h[0], h[1] - 0.05 * sc)); for (let i = hubs.length - 1; i >= 0; i--) sh.push(M(hubs[i][0] + (R() - 0.5) * 0.2 * sc, hubs[i][1] - cl.ry * (0.8 + 0.4 * R())));
+  const [cx, cy] = M(cl.x, cl.y); gradPoly(c, sh, cx, cy, cx, cy + cl.ry * ppm * 1.2, [[0, 'rgba(0,0,0,0.3)'], [1, 'rgba(0,0,0,0)']]);
+  for (const h of hubs) {
+    const nn = 9 + ((R() * 6) | 0), spread = 1.0 + 0.5 * R(), L0 = (0.22 + 0.16 * R()) * sc;
+    for (let i = 0; i < nn; i++) {
+      const a = -Math.PI / 2 + (i / (nn - 1) - 0.5) * 2 * spread + (R() - 0.5) * 0.12, L = L0 * (0.75 + 0.45 * R()) * (1 - 0.25 * Math.abs(i / (nn - 1) - 0.5));
+      const s = [h[0] + Math.cos(a) * 0.03 * sc, h[1] + Math.sin(a) * 0.03 * sc], e = [h[0] + Math.cos(a) * L, h[1] + Math.sin(a) * L];
+      brush(c, [M(s[0], s[1]), M(lerp(s[0], e[0], 0.5) + 0.01 * sc, lerp(s[1], e[1], 0.5)), M(e[0], e[1])], { w: 0.017 * sc * ppm, prof: PROF.tail, a: 0.62 + 0.3 * R(), seed: (R() * 1e6) | 0 });
+    }
+  }
+  // 눈 얹힌 윗선을 가볍게 짚는 마른 붓
+  brush(c, hubs.map(h => M(h[0], h[1] + 0.03 * sc)), { w: 0.02 * sc * ppm, prof: PROF.swell, a: 0.35, br: 4, dry: 0.8, seed: (R() * 1e6) | 0 });
+}
+function makeBough() {
+  const R = rng(818), W = 1500, H = 560, ink = mkcv(W, H), c = ink.getContext('2d', { willReadFrequently: true }), occ = mkcv(W, H), o = occ.getContext('2d');
+  const sc = 1.0, ppm = 150, M = (x, y) => [x * ppm, H - y * ppm];
+  const br = [[10.2, 3.9], [8.2, 3.05], [6.2, 2.55], [4.1, 2.35], [2.2, 2.25], [0.6, 2.0]];
+  brush(c, br.map(p => M(p[0], p[1])), { w: 26, prof: s => 1 - 0.75 * s, a: 0.92, br: 7, dry: 0.55, seed: 41 });
+  brush(o, br.map(p => M(p[0], p[1])), { w: 26, prof: s => 1 - 0.75 * s, a: 1, seed: 41 });
+  const subs = [[[6.9, 2.75], [6.2, 2.05], [5.9, 1.6]], [[4.6, 2.4], [3.9, 1.95], [3.5, 1.55]], [[2.6, 2.28], [1.9, 1.85], [1.6, 1.45]], [[8.9, 3.3], [8.5, 2.7]]];
+  for (const s of subs) { brush(c, s.map(p => M(p[0], p[1])), { w: 11, prof: PROF.tail, a: 0.9, br: 4, dry: 0.5, seed: (R() * 1e6) | 0 }); brush(o, s.map(p => M(p[0], p[1])), { w: 11, prof: PROF.tail, a: 1, seed: 1 }); }
+  const cls = [[5.8, 1.62, 1.0, 0.36], [3.4, 1.6, 0.95, 0.34], [1.5, 1.5, 0.9, 0.32], [0.55, 2.0, 0.6, 0.28], [8.3, 2.7, 0.8, 0.3], [7.1, 2.55, 0.65, 0.25], [4.6, 2.25, 0.6, 0.24]];
+  for (const [x, y, rx, ry] of cls) drawCluster(c, o, { x, y, rx, ry }, M, ppm, sc * 0.75, R);
+  encodeSprite(ink, 0, 0, 3);
+  return { ink: mips(ink), occ: mips(occ), w: W, h: H };
+}
+function makeMist(seed) {
+  const W = 1024, H = 112, cv = mkcv(W, H), c = cv.getContext('2d'), id = c.createImageData(W, H), d = id.data, s = seed * 13.7;
+  for (let j = 0; j < H; j++) { const prof = Math.pow(Math.sin(Math.PI * (j + 0.5) / H), 1.4); for (let i = 0; i < W; i++) {
+    const end = sstep(0, 60, i) * sstep(W, W - 60, i);
+    const n = fbm(i / 85 + s, j / 18 + s * 0.3, 5), a = prof * end * sstep(0.32, 0.72, n + 0.18 * prof);
+    d[(j * W + i) * 4 + 3] = Math.round(clamp(a, 0, 1) * 255); } }
+  c.putImageData(id, 0, 0); return cv;
+}
+
+// 한지: 은은한 얼룩 + 섬유 + 결
+function makePaper(w, h) {
+  const R = rng(1234), a = mkcv(w, h), c = a.getContext('2d', { willReadFrequently: true }), b = mkcv(w, h), cb = b.getContext('2d', { willReadFrequently: true });
+  const gw = Math.ceil(w / 6) + 2, gh = Math.ceil(h / 6) + 2, G = new Float32Array(gw * gh), G2 = new Float32Array(gw * gh);
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) { G[j * gw + i] = fbm(i * 0.035, j * 0.035, 5); G2[j * gw + i] = fbm(i * 0.16 + 9, j * 0.16, 3); }
+  const id = c.createImageData(w, h), d = id.data;
+  for (let y = 0; y < h; y++) { const gy = y / 6, j = gy | 0, v = gy - j; for (let x = 0; x < w; x++) {
+    const gx = x / 6, i = gx | 0, u = gx - i, k = j * gw + i;
+    const n = lerp(lerp(G[k], G[k + 1], u), lerp(G[k + gw], G[k + gw + 1], u), v), n2 = lerp(lerp(G2[k], G2[k + 1], u), lerp(G2[k + gw], G2[k + gw + 1], u), v);
+    const gr = (R() - 0.5) * 0.022, f = 0.955 + 0.07 * (n - 0.5) * 1.6 + 0.025 * (n2 - 0.5) + gr, o = (y * w + x) * 4;
+    d[o] = clamp(236 * f, 0, 255); d[o + 1] = clamp(228 * f, 0, 255); d[o + 2] = clamp(211 * f - 2, 0, 255); d[o + 3] = 255; } }
+  c.putImageData(id, 0, 0);
+  cb.fillStyle = '#000'; cb.fillRect(0, 0, w, h);
+  const s = w / 1920, NF = Math.round(2600 * s * s + 600);
+  for (let n = 0; n < NF; n++) {
+    const x = R() * w, y = R() * h, L = (12 + R() * R() * 150) * s, an = R() * TAU, bend = (R() - 0.5) * 1.6;
+    const pts = []; for (let k = 0; k <= 6; k++) { const t = k / 6, aa = an + bend * t; pts.push([x + Math.cos(aa) * L * t, y + Math.sin(aa) * L * t]); }
+    const lw = (0.35 + R() * 1.1) * Math.max(0.6, s), light = R() < 0.72;
+    c.beginPath(); c.moveTo(pts[0][0], pts[0][1]); for (const p of pts) c.lineTo(p[0], p[1]);
+    c.lineWidth = lw; c.strokeStyle = light ? `rgba(255,253,246,${0.18 + R() * 0.25})` : `rgba(150,135,110,${0.05 + R() * 0.08})`; c.stroke();
+    cb.beginPath(); cb.moveTo(pts[0][0], pts[0][1]); for (const p of pts) cb.lineTo(p[0], p[1]);
+    cb.lineWidth = lw * 1.2; cb.strokeStyle = `rgba(255,255,255,${0.35 + R() * 0.5})`; cb.stroke();
+  }
+  const pa = c.getImageData(0, 0, w, h), pb = cb.getImageData(0, 0, w, h);
+  for (let k = 0; k < w * h; k++) pa.data[k * 4 + 3] = pb.data[k * 4];
+  return pa;
+}
+
+// ---------------- 장면 데이터 ----------------
+let FAR, MIDR, RIDGE, PINES = [], PINE_SPR = [], BOUGH, MISTS = [], SEAL;
+const GMARKS = (() => { const r = rng(404), a = []; for (let i = 0; i < 38; i++) { const z = 2.5 + r() * 11; a.push({ x: -75 + r() * 180, z, len: 0.8 + r() * r() * 6 * (0.5 + z / 14), seed: (r() * 1e6) | 0, a: 0.08 + 0.14 * r(), w: 0.02 + 0.05 * r() * r(), tr: 3.0 + r() * 1.5, bump: (r() - 0.5) * 0.14 }); } return a; })();
+const TUFTS = (() => { const r = rng(505), a = []; for (let i = 0; i < 34; i++) a.push({ x: -70 + r() * 170, z: 2.5 + r() * 10, h: 0.12 + 0.22 * r(), n: 3 + (r() * 4 | 0), seed: (r() * 1e6) | 0, tr: 3.4 + r() * 1.2 }); return a; })();
+const FTUFTS = (() => { const r = rng(606), a = []; for (let x = 7.5; x < 19; x += 1.3 + r() * 2.2) a.push({ x, z: -1.5, h: 0.14 + 0.12 * r(), n: 4 + (r() * 4 | 0), seed: (r() * 1e6) | 0, tr: 4 }); return a; })();
+function buildPrints() {
+  const out = [];
+  const add = (gait, kind) => gait.legs.forEach((L, li) => {
+    const lands = [{ x: L.px0, t: -99 }].concat(L.ev.map(e => ({ x: e.x1, t: e.t1 })));
+    for (let i = 0; i < lands.length; i++) { const lift = (i < L.ev.length) ? L.ev[i].t0 : 1e9; out.push({ x: lands[i].x, z: L.z, kind, show: lift, fore: kind === 'T' && (li % 2 === 1) }); }
+  });
+  add(TGAIT, 'T'); add(MGAIT, 'M');
+  return out.sort((a, b) => a.x - b.x);
+}
+const PRINTS = buildPrints();
+
+// ============================================================
+//  배경 레이어 그리기 (먹 농도 캔버스)
+// ============================================================
+let bgC, chC, sc = 1;
+function drawRange(c, L, cam, alpha = 1) {
+  const k = F / (cam.D + L.z), x = 960 + k * (L.x0 - cam.x), y = cam.hy + k * (cam.y - L.top), w = L.wm * k, h = L.hm * k;
+  if (x > LW || x + w < 0) return;
+  const dw = w * sc;
+  c.globalAlpha = 1; c.globalCompositeOperation = 'destination-out'; c.drawImage(pickMip(L.occ, dw), x, y, w, h);
+  c.globalCompositeOperation = 'source-over'; c.globalAlpha = alpha; c.drawImage(pickMip(L.ink, dw), x, y, w, h); c.globalAlpha = 1;
+}
+function drawMist(c, idx, cam, z, hpx, alpha, drift) {
+  const k = F / (cam.D + z), base = cam.hy + k * cam.y, img = MISTS[idx % MISTS.length];
+  // 가로 폭 4200px 한 장: 카메라 이동·표류가 이 안에서 끝나도록 잡았다 (타일을 잇지 않으므로 세로 이음새가 없다)
+  const left = clamp(-180 - k * cam.x - drift, -2270, 0);
+  c.globalCompositeOperation = 'destination-out'; c.globalAlpha = alpha;
+  c.drawImage(img, left, base - hpx * 0.62, 4200, hpx);
+  c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
+}
+function drawBG(t, cam) {
+  const c = bgC.ctx; c.setTransform(sc, 0, 0, sc, 0, 0); c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1; c.clearRect(0, 0, LW, LH);
+  const close = sstep(2.6, 1.2, cam.y), wind = windAt(t);
+  const drift = t * (6 + 10 * wind);
+  drawRange(c, FAR, cam);
+  drawMist(c, 0, cam, FAR.z, 150, 0.85, drift * 0.3);
+  drawRange(c, MIDR, cam);
+  drawMist(c, 1, cam, MIDR.z, 120, 0.9, drift * 0.6);
+  drawRange(c, RIDGE, cam, 1 - 0.35 * close);
+  drawMist(c, 2, cam, RIDGE.z, 110 + 90 * close, 0.92, drift);
+  // 소나무 열 (z = 14)
+  const kz = F / (cam.D + 14);
+  for (const p of PINES) {
+    const s = PINE_SPR[p.v], [bx, by] = proj(cam, p.x, 0, 14), w = s.wm * kz * p.s, h = s.hm * kz * p.s;
+    let x = bx - s.bx * kz * p.s, y = by - (s.hm - s.by) * kz * p.s;
+    if (x > LW + 20 || x + w < -20) continue;
+    c.save();
+    if (p.flip) { c.translate(bx * 2, 0); c.scale(-1, 1); }
+    c.globalCompositeOperation = 'destination-out'; c.drawImage(pickMip(s.occ, w * sc), x, y, w, h);
+    c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1 - 0.55 * close; c.drawImage(pickMip(s.ink, w * sc), x, y, w, h);
+    c.restore();
+  }
+  drawMist(c, 3, cam, 14, 120 + 160 * close, 0.75 + 0.2 * close, drift * 1.4);
+  // 설원의 마른 붓 자국
+  for (const g of GMARKS) {
+    const k = F / (cam.D + g.z); const [x0, y0] = proj(cam, g.x, 0, g.z); if (x0 > LW + 50 || x0 + g.len * k < -50 || y0 > LH + 20) continue;
+    const pts = []; for (let i = 0; i <= 4; i++) { const u = i / 4; pts.push(proj(cam, g.x + g.len * u, g.bump * Math.sin(Math.PI * u), g.z)); }
+    brush(c, pts, { w: Math.max(0.6, g.w * k), prof: PROF.swell, a: g.a, br: 5, dry: 0.75, col: tcode(g.tr), seed: g.seed });
+  }
+  for (const g of TUFTS) drawTuft(c, cam, g, 0.75);
+  // 발자국
+  for (const p of PRINTS) {
+    if (t < p.show) continue;
+    const k = F / (cam.D + p.z), [px, py] = proj(cam, p.x, 0, p.z); if (px < -40 || px > LW + 40) continue;
+    const age = t - p.show, fade = sstep(0, 0.25, age) * Math.exp(-Math.max(0, age) / 40) * (1 - 0.6 * blizAt(t));
+    const al = (p.kind === 'T' ? 0.2 : 0.22) * fade; if (al < 0.01) continue;
+    // 눈에 패인 자국: 앞쪽(먼 쪽) 벽에만 그늘이 지는 옅은 초승달
+    const ry = Math.abs(proj(cam, p.x, 0, p.z + 0.06)[1] - proj(cam, p.x, 0, p.z - 0.06)[1]) * (p.kind === 'T' ? 0.75 : 0.6);
+    const rx = (p.kind === 'T' ? 0.06 : 0.12) * k, col = tcode(p.show < 0 ? 3.2 : 3.4), R = rng((p.x * 1000) | 0), ex = Math.max(0.6, ry);
+    c.save(); c.translate(px, py); c.rotate((R() - 0.5) * 0.2); c.scale(1, ex / rx);
+    const g = c.createRadialGradient(0, -rx * 0.18, 0, 0, 0, rx);
+    g.addColorStop(0, `rgba(${col},${al})`); g.addColorStop(0.6, `rgba(${col},${al * 0.7})`); g.addColorStop(1, `rgba(${col},0)`);
+    c.fillStyle = g; c.beginPath(); c.arc(0, 0, rx, 0, TAU); c.fill(); c.restore();
+  }
+  // 그림자
+  shadow(c, cam, XT(t), 0.95, 0.22, 0.13, 3.4);
+  shadow(c, cam, XM(t), 0.36, 0.2, 0.11, 3.4);
+  // 앞쪽 마른 풀, 위에서 늘어진 솔가지 (인물과 겹치지 않는 위치에만)
+  for (const g of FTUFTS) drawTuft(c, cam, g, 1);
+  const bx = 960 + 520 * (10.3 - cam.x) - BOUGH.w * 0.5;
+  if (bx < LW && bx + BOUGH.w > 0 && t > 6 && t < 18) {
+    c.globalCompositeOperation = 'destination-out'; c.drawImage(BOUGH.occ[0], bx, -150, BOUGH.w, BOUGH.h);
+    c.globalCompositeOperation = 'source-over'; c.drawImage(BOUGH.ink[0], bx, -150, BOUGH.w, BOUGH.h);
+  }
+}
+function shadow(c, cam, x, rx, rz, a, tr) {
+  const [cx, cy] = proj(cam, x, 0, 0), k = F / cam.D, ry = Math.abs(proj(cam, x, 0, rz)[1] - proj(cam, x, 0, -rz)[1]) / 2;
+  if (ry < 0.3) return;
+  c.save(); c.translate(cx, cy); c.scale(1, ry / (rx * k));
+  const g = c.createRadialGradient(0, 0, 0, 0, 0, rx * k); g.addColorStop(0, `rgba(${tcode(tr)},${a})`); g.addColorStop(1, `rgba(${tcode(tr)},0)`);
+  c.fillStyle = g; c.beginPath(); c.arc(0, 0, rx * k, 0, TAU); c.fill(); c.restore();
+}
+function drawTuft(c, cam, g, a) {
+  if (cam.D + g.z < 0.6) return;
+  const k = F / (cam.D + g.z), [x, y] = proj(cam, g.x, 0, g.z); if (x < -60 || x > LW + 60 || y > LH + 80 || y < -50) return;
+  const R = rng(g.seed);
+  for (let i = 0; i < g.n; i++) {
+    const ox = (R() - 0.5) * 0.25, h = g.h * (0.5 + 0.7 * R()), lean = (R() - 0.6) * 0.5;
+    brush(c, [proj(cam, g.x + ox, 0, g.z), proj(cam, g.x + ox + lean * h * 0.5, h * 0.55, g.z), proj(cam, g.x + ox + lean * h, h, g.z)], { w: Math.max(0.5, 0.012 * k), prof: PROF.tail, a: a * (0.55 + 0.35 * R()), col: tcode(g.tr), seed: (R() * 1e6) | 0 });
+  }
+}
+
+// ============================================================
+//  호랑이
+// ============================================================
+// 줄무늬: 서로 떨어져 있고 양끝이 가늘며, 몸의 (u: 엉덩이→어깨, v: 등→배) 좌표에 붙어 몸을 따라 휜다
+const STR = (() => { const r = rng(2024), top = []; let u = 0.035;
+  while (u < 0.96) { const sh = u > 0.76, pair = r() < 0.28;
+    top.push({ u, len: (sh ? 0.28 + 0.22 * r() : 0.38 + 0.4 * r()), w: 0.026 + 0.02 * r(), sl: -0.03 + (r() - 0.5) * 0.04, z1: (r() - 0.5) * 0.05, z2: (r() - 0.5) * 0.03, v0: r() < 0.25 ? 0.08 + 0.1 * r() : 0, fork: r() < 0.3, seed: (r() * 1e6) | 0 });
+    if (pair) top.push({ u: u + 0.022, len: 0.18 + 0.2 * r(), w: 0.014 + 0.008 * r(), sl: -0.03, z1: (r() - 0.5) * 0.03, z2: 0, v0: 0.05 + 0.1 * r(), fork: false, seed: (r() * 1e6) | 0 });
+    u += 0.06 + 0.045 * r(); }
+  const bot = []; for (let u = 0.12; u < 0.82; u += 0.09 + 0.06 * r()) bot.push({ u, len: 0.12 + 0.16 * r(), w: 0.016 + 0.012 * r(), z1: (r() - 0.5) * 0.04, seed: (r() * 1e6) | 0 }); return { top, bot }; })();
+const STRIPE = s => Math.pow(Math.max(0, Math.sin(Math.PI * clamp(s, 0, 1))), 0.55) * (1 - 0.35 * s);
+const blinkAt = t => { const d = t - 15.95; if (d < 0 || d > 0.3) return 1; if (d < 0.09) return 1 - sstep(0, 0.09, d); if (d < 0.13) return 0; return sstep(0.13, 0.3, d); };
+const twitch = (t, t0) => { const d = t - t0; if (d < 0 || d > 0.6) return 0; return d < 0.07 ? sstep(0, 0.07, d) : Math.exp(-(d - 0.07) / 0.11); };
+const PUFFS = [{ t0: 16.85, dur: 2.3, k: 1 }, { t0: 19.7, dur: 1.8, k: 0.45 }, { t0: 21.65, dur: 1.5, k: 0.6 }, { t0: 21.95, dur: 1.4, k: 0.45 }, { t0: 24.7, dur: 1.2, k: 0.35 }];
+
+function tigerPose(t) {
+  const X = XT(t), v = samp(TT.V, t), walk = clamp(v / 0.6, 0, 1);
+  const legs = TGAIT.legs.map((L, i) => ({ ...footAt(L, t, XT), b: samp(TB[i], t), z: L.z, L }));
+  const raise = sstep(18.15, 19.05, t) * (1 - sstep(26.9, 27.8, t));
+  const bm = legs.map(l => l.b);
+  return { X, v, walk, legs, raise, bm, by: -0.012 + 0.005 * (bm[0] + bm[1] + bm[2] + bm[3]), pitch: 0.012 * ((bm[0] + bm[2]) - (bm[1] + bm[3])),
+    breath: (1 - walk) * Math.sin(TAU * (t - 16.85) / 3.1), headBob: -0.012 * walk * Math.sin(TAU * X / 0.55 + 1.3), nod: 0.025 * walk * Math.sin(TAU * X / 0.55 + 0.2) };
+}
+function drawTiger(c, t, cam) {
+  const P = tigerPose(t), X = P.X, cp = Math.cos(P.pitch), spn = Math.sin(P.pitch);
+  const B = (x, y) => [x * cp - (y - 0.62) * spn, 0.62 + x * spn + (y - 0.62) * cp + P.by];
+  const S = (q, z = 0) => proj(cam, X + q[0], q[1], z);
+  const kz = z => F / (cam.D + z), k = kz(0), wpx = (m, z = 0) => Math.max(0.55, m * kz(z));
+  const wind = windAt(t);
+  const [bLH, bLF, bRH, bRF] = P.bm;
+  // 머리 위치
+  const ha = 0.12 * P.raise + P.nod, Hc = [0.9, 0.73 + 0.045 * P.raise + P.headBob], HSC = 1.12;
+  const hcs = Math.cos(ha), hsn = Math.sin(ha), HL = (x, y) => [Hc[0] + (x * hcs - y * hsn) * HSC, Hc[1] + (x * hsn + y * hcs) * HSC];
+  // 몸통 윤곽 (묵직한 가슴, 낮은 머리)
+  const dorsal = [B(-0.885, 0.835), B(-0.74, 0.93 + 0.022 * bLH + 0.008 * bRH), B(-0.42, 0.912), B(-0.05, 0.886), B(0.32, 0.962 + 0.03 * bLF + 0.012 * bRF), B(0.58, 0.895 + 0.01 * bLF), HL(-0.118, 0.078)];
+  const ventral = [HL(-0.03, -0.14), B(0.76, 0.52), B(0.54, 0.35 - 0.004 * P.breath), B(0.1, 0.335 - 0.008 * P.breath), B(-0.3, 0.365), B(-0.55, 0.48), B(-0.84, 0.58), B(-0.93, 0.72)];
+  const dD = cr(dorsal, false, 8), dV = cr(ventral.slice(0, 6), false, 8).slice().reverse();
+  const yAt = (poly, x) => { if (x <= poly[0][0]) return poly[0][1]; for (let i = 1; i < poly.length; i++) if (poly[i][0] >= x) { const a = poly[i - 1], b = poly[i]; return lerp(a[1], b[1], (x - a[0]) / ((b[0] - a[0]) || 1)); } return poly[poly.length - 1][1]; };
+  const yTop = x => yAt(dD, x), yBot = x => x < -0.55 ? 0.48 + (-0.55 - x) * 0.35 : yAt(dV, x);
+  const bodyLoc = [...dorsal, ...ventral], bodyS = bodyLoc.map(q => S(q));
+  // ---- 다리 기하 ----
+  const flexF = f => f.s >= 0 ? -1.2 * Math.sin(Math.PI * Math.pow(f.s, 0.8)) : 0, flexH = f => f.s >= 0 ? -0.8 * Math.sin(Math.PI * f.s) : 0;
+  function fore(f, bump) {
+    const sj = B(0.48 + 0.05 * clamp(f.rel, -1, 1), 0.66 + 0.02 * bump), ball = [f.x - X, f.y], ps = flexF(f), cs = Math.cos(ps), sn = Math.sin(ps);
+    const pr = (x, y) => [ball[0] + (x * cs - y * sn) * 1.18, ball[1] + (x * sn + y * cs) * 1.18];
+    const W = pr(-0.03, 0.085), E = ik2(sj, W, 0.31, 0.36, -1), Mm = mid(E, W), n1 = lnorm(sj, E), n2 = lnorm(E, W), nE = avgN(n1, n2);
+    const front = [B(0.76, 0.49), ad(sj, n1, 0.12), ad(E, nE, 0.088), ad(Mm, n2, 0.082), ad(W, n2, 0.066), pr(0.07, 0.068)];
+    const paw = [pr(0.09, 0.04), pr(0.082, 0.014), pr(0.04, 0.0), pr(-0.02, -0.002), pr(-0.055, 0.006)];
+    const back = [pr(-0.062, 0.032), ad(W, n2, -0.07), ad(Mm, n2, -0.082), ad(E, nE, -0.108), ad(E, [-0.2, 1], 0.08), B(0.3, 0.44)];
+    return { kind: 'F', sj, E, W, M: Mm, n2, nE, front, paw, back, pr, low: [ad(E, nE, 0.088), ad(Mm, n2, 0.082), ad(W, n2, 0.066), pr(0.07, 0.068), ...paw, pr(-0.062, 0.032), ad(W, n2, -0.07), ad(Mm, n2, -0.082), ad(E, nE, -0.108)] };
+  }
+  function hind(f, bump) {
+    const hj = B(-0.66, 0.70 + 0.02 * bump), ball = [f.x - X, f.y], ps = flexH(f), cs = Math.cos(ps), sn = Math.sin(ps);
+    const pr = (x, y) => [ball[0] + (x * cs - y * sn) * 1.15, ball[1] + (x * sn + y * cs) * 1.15];
+    let phi; if (f.s < 0) phi = 0.38 - 0.12 * clamp(f.rel, -1, 1); else phi = lerp(0.38 - 0.12 * clamp(f.e.r0, -1, 1), 0.38 - 0.12 * clamp(f.e.r1, -1, 1), f.s) + 0.5 * Math.sin(Math.PI * f.s);
+    const heel = pr(-0.07, 0.035), A = [heel[0] - 0.23 * Math.sin(phi), heel[1] + 0.23 * Math.cos(phi)], K = ik2(hj, A, 0.34, 0.38, 1);
+    const n1 = lnorm(hj, K), n2 = lnorm(K, A), n3 = lnorm(A, heel), nK = avgN(n1, n2), nA = avgN(n2, n3), Mm = mid(K, A), Mh = mid(A, heel);
+    const front = [B(-0.52, 0.48), ad(K, nK, 0.08), ad(Mm, n2, 0.06), ad(A, nA, 0.05), ad(Mh, n3, 0.046), pr(0.06, 0.06)];
+    const paw = [pr(0.088, 0.035), pr(0.078, 0.012), pr(0.04, 0.0), pr(-0.02, -0.002), pr(-0.072, 0.006)];
+    // 엉덩이(궁둥이) 윤곽은 몸통에 붙여 두고 다리 각도에 따라 조금만 움직인다
+    const kb = ad(K, nK, -0.12), butt = B(-0.92 + 0.06 * clamp(f.rel, -1, 1), 0.64);
+    const back = [pr(-0.08, 0.036), ad(Mh, n3, -0.05), ad(A, nA, -0.076), ad(Mm, n2, -0.07), kb, [lerp(kb[0], butt[0], 0.55), lerp(kb[1], butt[1], 0.55) - 0.02], butt, B(-0.885, 0.8)];
+    return { kind: 'H', hj, K, A, heel, M: Mm, n1, n2, nK, front, paw, back, pr, low: [ad(K, nK, 0.08), ad(Mm, n2, 0.06), ad(A, nA, 0.05), ad(Mh, n3, 0.046), pr(0.06, 0.06), ...paw, pr(-0.08, 0.036), ad(Mh, n3, -0.05), ad(A, nA, -0.076), ad(Mm, n2, -0.07), ad(K, nK, -0.12)] };
+  }
+  function drawLeg(g, z, far) {
+    const poly = [...g.front, ...g.paw, ...g.back].map(q => S(q, z));
+    fillPoly(c, poly, far ? 'rgba(214,214,214,1)' : 'rgba(255,255,255,1)');
+    const fa = far ? 0.55 : 1;
+    // 그늘 바림: 무릎·팔꿈치 아래에만 (허벅지와 몸통이 만나는 곳에 경계가 생기지 않게)
+    const low = g.low.map(q => S(q, z)), fr = S(g.low[1], z), bk = S(g.low[g.low.length - 2], z);
+    gradPoly(c, low, bk[0], bk[1], fr[0], fr[1], [[0, `rgba(0,0,0,${0.16 * fa})`], [0.6, 'rgba(0,0,0,0.02)'], [1, 'rgba(0,0,0,0)']]);
+    // 줄무늬
+    c.save(); polyPath(c, poly); c.clip();
+    if (g.kind === 'F') {
+      for (const [a, len] of [[0.2, 0.55], [0.45, 0.6], [0.7, 0.45]]) { const base = [lerp(g.E[0], g.W[0], a), lerp(g.E[1], g.W[1], a)]; const p0 = ad(base, g.n2, -0.07), p1 = ad(ad(base, g.n2, -0.07 + 0.13 * len), [0, 1], -0.012); brush(c, [S(p0, z), S(mid(p0, p1), z), S(p1, z)], { w: wpx(0.013, z), prof: PROF.swell, a: 0.85 * fa, seed: 900 + a * 100 }); }
+    } else {
+      // 넓적다리의 동심 호 무늬 (고관절 둘레)
+      const ang0 = Math.atan2(g.K[1] - g.hj[1], g.K[0] - g.hj[0]);
+      for (let i = 0; i < 4; i++) { const r = 0.1 + 0.058 * i, a0 = ang0 - 1.55 + 0.12 * i, a1 = ang0 - 0.25 - 0.1 * (i % 2), pts = []; for (let j = 0; j <= 5; j++) { const a = lerp(a0, a1, j / 5), rr = r * (1 + 0.06 * Math.sin(j * 1.7 + i)); pts.push(S([g.hj[0] + Math.cos(a) * rr, g.hj[1] + Math.sin(a) * rr], z)); } brush(c, pts, { w: wpx(0.024 - 0.002 * i, z), prof: s => Math.pow(Math.sin(Math.PI * s), 0.6) * (1 - 0.3 * s), a: 0.9 * fa, br: 3, dry: 0.25, seed: 700 + i }); }
+      for (const a of [0.3, 0.62]) { const base = [lerp(g.K[0], g.A[0], a), lerp(g.K[1], g.A[1], a)], p0 = ad(base, g.n2, -0.06), p1 = ad(base, g.n2, 0.0); brush(c, [S(p0, z), S(p1, z)], { w: wpx(0.011, z), prof: PROF.swell, a: 0.8 * fa, seed: 800 + a * 10 }); }
+    }
+    c.restore();
+    // 필선
+    if (g.kind === 'F') {
+      brush(c, [g.back[4], g.back[3], g.back[2], g.back[1], g.back[0]].map(q => S(q, z)), { w: wpx(0.016, z), prof: PROF.nail, a: 0.9 * fa, br: 5, dry: 0.4, seed: far ? 31 : 11 });
+      brush(c, [g.front[1], g.front[2], g.front[3], g.front[4], g.front[5]].map(q => S(q, z)), { w: wpx(0.011, z), prof: PROF.press, a: 0.75 * fa, br: 4, dry: 0.55, seed: far ? 32 : 12 });
+    } else {
+      brush(c, [g.back[7], g.back[6], g.back[5], g.back[4], g.back[3], g.back[2], g.back[1], g.back[0]].map(q => S(q, z)), { w: wpx(0.018, z), prof: PROF.nail, a: 0.92 * fa, br: 6, dry: 0.45, seed: far ? 33 : 13 });
+      brush(c, [g.front[1], g.front[2], g.front[3], g.front[4], g.front[5]].map(q => S(q, z)), { w: wpx(0.01, z), prof: PROF.press, a: 0.7 * fa, br: 4, dry: 0.6, seed: far ? 34 : 14 });
+      if (!far) brush(c, [S(B(-0.5, 0.64)), S(B(-0.55, 0.56)), S(B(-0.585, 0.5))], { w: wpx(0.009), prof: PROF.tail, a: 0.55, seed: 15 });
+    }
+    brush(c, [g.paw[4], g.paw[3], g.paw[2], g.paw[1]].map(q => S(q, z)), { w: wpx(0.012, z), prof: PROF.press, a: 0.85 * fa, seed: far ? 35 : 16 });
+    brush(c, [g.paw[1], g.paw[0], g.pr(0.075, 0.06), g.pr(0.045, 0.072)].map(q => S(q, z)), { w: wpx(0.01, z), prof: PROF.swell, a: 0.8 * fa, seed: far ? 36 : 17 });
+    for (const tx of [0.035, 0.06]) brush(c, [S(g.pr(tx, 0.002), z), S(g.pr(tx + 0.004, 0.026), z)], { w: wpx(0.006, z), prof: PROF.swell, a: 0.7 * fa, seed: 18 + tx * 100 });
+  }
+  // 1) 먼 쪽 다리
+  drawLeg(hind(P.legs[2], bRH), P.legs[2].z, true);
+  drawLeg(fore(P.legs[3], bRF), P.legs[3].z, true);
+  // 2) 꼬리
+  {
+    const N = 11, Ls = 0.09, root = B(-0.875, 0.835), pts = [root]; let p = root;
+    const ph = TAU * X / 1.1;
+    for (let i = 0; i < N; i++) { const s = (i + 0.5) / N; let th = Math.PI + 0.3 + 1.05 * sstep(0, 0.55, s) - 0.85 * sstep(0.62, 1, s); th += (0.09 * P.walk * Math.sin(ph * 0.5 - i * 0.45) + 0.05 * Math.sin(t * 1.1 - i * 0.3)) * s - 0.38 * wind * s * s; p = [p[0] + Math.cos(th) * Ls, p[1] + Math.sin(th) * Ls]; pts.push(p); }
+    const dense = cr(pts, false, 4), M = dense.length, top = [], bot = [];
+    for (let i = 0; i < M; i++) { const n = lnorm(dense[Math.max(0, i - 1)], dense[Math.min(M - 1, i + 1)]), w = lerp(0.052, 0.037, i / (M - 1)) * (i === M - 1 ? 0.6 : 1); top.push(ad(dense[i], n, w)); bot.push(ad(dense[i], n, -w)); }
+    const poly = [...top, ...bot.slice().reverse()].map(q => S(q));
+    fillPoly(c, poly, 'rgba(255,255,255,1)');
+    gradPoly(c, poly, ...S(top[(M / 2) | 0]), ...S(bot[(M / 2) | 0]), [[0, 'rgba(0,0,0,0.0)'], [1, 'rgba(0,0,0,0.16)']]);
+    c.save(); polyPath(c, poly); c.clip();
+    for (const s of [0.22, 0.33, 0.44, 0.54, 0.63, 0.71, 0.79, 0.86]) { const i = Math.round(s * (M - 1)), sh = Math.round(0.02 * M); brush(c, [S(ad(top[Math.min(M - 1, i + sh)], lnorm(bot[i], top[i]), 0.01)), S(dense[i]), S(ad(bot[Math.max(0, i - sh)], lnorm(top[i], bot[i]), 0.01))], { w: wpx(0.024 - 0.008 * s), prof: s2 => Math.min(1, s2 * 4 + 0.35, (1 - s2) * 4 + 0.35), a: 0.9, br: 3, dry: 0.2, seed: 400 + s * 100 }); }
+    const tipI = Math.round(0.9 * (M - 1)); fillPoly(c, [...top.slice(tipI), ...bot.slice(tipI).reverse()].map(q => S(q)), 'rgba(0,0,0,0.85)');
+    c.restore();
+    brush(c, top.map(q => S(q)), { w: wpx(0.01), prof: PROF.press, a: 0.75, br: 4, dry: 0.6, seed: 401 });
+    brush(c, bot.map(q => S(q)), { w: wpx(0.012), prof: PROF.nail, a: 0.82, br: 4, dry: 0.5, seed: 402 });
+  }
+  // 3) 몸통
+  fillPoly(c, bodyS, 'rgba(255,255,255,1)');
+  { const a = S(B(0, 0.68)), b = S(B(0, 0.33)); gradPoly(c, bodyS, a[0], a[1], b[0], b[1], [[0, 'rgba(0,0,0,0)'], [0.65, 'rgba(0,0,0,0.06)'], [1, 'rgba(0,0,0,0.22)']]); }
+  brush(c, [S(B(0.3, 0.93)), S(B(0.38, 0.75)), S(B(0.36, 0.52))], { w: wpx(0.06), prof: PROF.swell, a: 0.07, seed: 51 });
+  c.save(); polyPath(c, bodyS); c.clip();
+  const ux = u => lerp(-0.86, 0.74, u);
+  const bp = (u, v) => { const x = ux(u); return [x, lerp(yTop(x), yBot(x), v)]; };
+  for (const s of STR.top) {
+    const L = s.len * (s.u > 0.9 ? 0.7 : 1), pts = [];
+    for (let j = 0; j <= 6; j++) { const q = j / 6, v = s.v0 + (L - s.v0) * q; pts.push(S(bp(s.u + s.sl * v + s.z1 * Math.sin(Math.PI * q) + s.z2 * Math.sin(TAU * q), v - 0.015))); }
+    brush(c, pts, { w: wpx(s.w), prof: STRIPE, a: 0.94, br: 4, dry: 0.22, wob: 0.22, seed: s.seed });
+    if (s.fork) { const v0 = L * 0.55, f = []; for (let j = 0; j <= 3; j++) { const v = v0 + L * 0.4 * j / 3; f.push(S(bp(s.u + s.sl * v + 0.04 * j / 3 + s.z1 * 0.5, v))); } brush(c, f, { w: wpx(s.w * 0.6), prof: STRIPE, a: 0.9, seed: s.seed + 1 }); }
+  }
+  for (const s of STR.bot) { const pts = []; for (let j = 0; j <= 3; j++) { const v = 1.02 - s.len * j / 3; pts.push(S(bp(s.u + s.z1 * Math.sin(Math.PI * j / 3), v))); } brush(c, pts, { w: wpx(s.w), prof: STRIPE, a: 0.86, seed: s.seed }); }
+  c.restore();
+  brush(c, [dorsal[6], dorsal[5], dorsal[4]].map(q => S(q)), { w: wpx(0.017), prof: PROF.press, a: 0.9, br: 5, dry: 0.45, seed: 61 });
+  brush(c, [dorsal[4], dorsal[3], dorsal[2]].map(q => S(q)), { w: wpx(0.014), prof: PROF.nail, a: 0.85, br: 5, dry: 0.6, seed: 62 });
+  brush(c, [dorsal[2], dorsal[1], dorsal[0]].map(q => S(q)), { w: wpx(0.017), prof: PROF.press, a: 0.88, br: 5, dry: 0.5, seed: 63 });
+  brush(c, [ventral[0], ventral[1], ventral[2]].map(q => S(q)), { w: wpx(0.012), prof: PROF.press, a: 0.8, br: 4, dry: 0.5, seed: 64 });
+  brush(c, [ventral[2], ventral[3], ventral[4], ventral[5]].map(q => S(q)), { w: wpx(0.009), prof: PROF.tail, a: 0.6, br: 4, dry: 0.7, seed: 65 });
+  for (const x of [-0.05, -0.2, -0.36]) { const y = yBot(x); brush(c, [S(B(x + 0.02, y + 0.01)), S(B(x - 0.01, y - 0.025))], { w: wpx(0.006), prof: PROF.tail, a: 0.55, seed: 66 + x * 10 }); }
+  // 4) 가까운 쪽 다리
+  drawLeg(hind(P.legs[0], bLH), P.legs[0].z, false);
+  drawLeg(fore(P.legs[1], bLF), P.legs[1].z, false);
+  // 5) 머리
+  drawTigerHead(c, t, P, HL, q => S(q), wpx);
+  // 6) 입김
+  for (const pf of PUFFS) {
+    const u = (t - pf.t0) / pf.dur; if (u < 0 || u > 1) continue;
+    const nose = HL(0.2, -0.02);
+    // 찬 공기에 맺힌 입김: 옅은 먹 바림이 길게 풀리며 바람에 밀린다
+    for (let i = 0; i < 9; i++) {
+      const ui = clamp(u * 1.3 - i * 0.035, 0, 1); if (ui <= 0) continue;
+      const dx = 0.015 + (0.06 + 0.022 * i) * Math.pow(ui, 0.5) + 0.22 * ui * ui - 1.1 * wind * ui * ui, dy = -0.045 - 0.02 * Math.pow(ui, 0.5) + 0.16 * ui * ui + 0.02 * Math.sin(i * 2.1 + ui * 5);
+      const r = (0.018 + 0.08 * Math.pow(ui, 0.8)) * (0.75 + 0.05 * i), al = pf.k * 0.17 * Math.pow(1 - ui, 1.3) * sstep(0, 0.08, ui) * (1 - i * 0.07);
+      const [px, py] = S([nose[0] + dx, nose[1] + dy]), rp = r * k;
+      c.save(); c.translate(px, py); c.rotate(-0.2 + 0.3 * Math.sin(i * 1.3)); c.scale(1.9, 0.75);
+      const g = c.createRadialGradient(0, 0, 0, 0, 0, rp); g.addColorStop(0, `rgba(0,0,0,${al})`); g.addColorStop(0.5, `rgba(0,0,0,${al * 0.5})`); g.addColorStop(1, 'rgba(0,0,0,0)');
+      c.fillStyle = g; c.beginPath(); c.arc(0, 0, rp, 0, TAU); c.fill(); c.restore();
+    }
+  }
+}
+function drawTigerHead(c, t, P, HL, S, wpx) {
+  const H = (x, y) => S(HL(x, y)), wind = windAt(t);
+  const eNear = 0.95 * (twitch(t, 23.95) + 0.8 * twitch(t, 25.15)), eFar = 0.8 * twitch(t, 24.3);
+  const ear = (bx, by, rot, far) => { const cs = Math.cos(rot), sn = Math.sin(rot), E = (x, y) => H(bx + x * cs - y * sn, by + x * sn + y * cs); const pts = [E(-0.035, -0.008), E(-0.04, 0.03), E(-0.022, 0.058), E(0.006, 0.06), E(0.03, 0.035), E(0.034, 0.0)]; fillPoly(c, pts, far ? 'rgba(200,200,200,1)' : 'rgba(255,255,255,1)'); brush(c, [pts[0], pts[1], pts[2], pts[3]], { w: wpx(far ? 0.012 : 0.017), prof: PROF.nail, a: far ? 0.55 : 0.92, seed: far ? 71 : 72 }); brush(c, [pts[3], pts[4], pts[5]], { w: wpx(0.008), prof: PROF.tail, a: far ? 0.4 : 0.7, seed: far ? 73 : 74 }); if (!far) brush(c, [E(-0.018, 0.005), E(-0.012, 0.035), E(0.008, 0.045)], { w: wpx(0.006), prof: PROF.swell, a: 0.4, seed: 75 }); };
+  ear(0.02, 0.112, 0.18 + eFar, true);
+  // 넓은 이마, 길고 곧은 콧등, 뭉툭하고 깊은 주둥이, 두툼한 턱과 볼 갈기 — 고양이·쥐처럼 뾰족하지 않게
+  const head = [[-0.13, 0.075], [-0.07, 0.115], [0.02, 0.126], [0.085, 0.108], [0.135, 0.088], [0.18, 0.064], [0.205, 0.04], [0.213, 0.012], [0.209, -0.02], [0.201, -0.052], [0.182, -0.076], [0.15, -0.086], [0.172, -0.1], [0.125, -0.127], [0.04, -0.142], [-0.05, -0.142], [-0.115, -0.118], [-0.165, -0.05], [-0.162, 0.02]];
+  const hs = head.map(q => H(q[0], q[1]));
+  fillPoly(c, hs, 'rgba(255,255,255,1)');
+  { const a = H(0.02, 0.0), b = H(0.0, -0.12); gradPoly(c, hs, a[0], a[1], b[0], b[1], [[0, 'rgba(0,0,0,0)'], [1, 'rgba(0,0,0,0.15)']]); }
+  ear(-0.05, 0.108, 0.12 + eNear, false);
+  // 볼 갈기
+  for (let i = 0; i < 9; i++) { const a = i / 8, b0 = [lerp(-0.1, -0.02, a) - 0.04 * Math.sin(a * Math.PI), lerp(-0.01, -0.14, a)], fl = 0.014 * wind * vn1(t * 6 + i); brush(c, [H(b0[0], b0[1]), H(b0[0] - 0.05 + fl, b0[1] - 0.014 - 0.012 * a), H(b0[0] - 0.085 + fl * 1.5, b0[1] - 0.035 * a - 0.006)], { w: wpx(0.01), prof: PROF.tail, a: 0.72, seed: 80 + i }); }
+  // 필선
+  brush(c, [H(-0.03, 0.124), H(0.03, 0.127), H(0.085, 0.109), H(0.135, 0.089), H(0.18, 0.065), H(0.205, 0.042)], { w: wpx(0.011), prof: PROF.press, a: 0.85, br: 4, dry: 0.4, seed: 90 });
+  fillPoly(c, [H(0.188, 0.036), H(0.212, 0.026), H(0.214, -0.004), H(0.2, -0.014), H(0.188, 0.008)], 'rgba(0,0,0,0.85)');
+  brush(c, [H(0.211, -0.014), H(0.205, -0.04), H(0.19, -0.068), H(0.16, -0.084), H(0.12, -0.084), H(0.092, -0.076)], { w: wpx(0.011), prof: PROF.nail, a: 0.9, seed: 91 });
+  brush(c, [H(0.172, -0.1), H(0.125, -0.127), H(0.04, -0.142)], { w: wpx(0.009), prof: PROF.press, a: 0.62, seed: 92 });
+  brush(c, [H(-0.13, 0.075), H(-0.15, 0.025), H(-0.152, -0.03)], { w: wpx(0.008), prof: PROF.tail, a: 0.5, seed: 93 });
+  // 눈
+  const open = blinkAt(t) * (1 - 0.35 * blizAt(t)), ec = [0.075, 0.048], ax = [-0.94, 0.34], ay = [-0.34, -0.94];
+  const EP = (u, v) => H(ec[0] + ax[0] * u + ay[0] * v, ec[1] + ax[1] * u + ay[1] * v);
+  const ew = 0.024, eh = 0.012 * Math.max(0.08, open);
+  if (open > 0.15) {
+    const lens = []; for (let i = 0; i <= 8; i++) { const u = -1 + 2 * i / 8; lens.push(EP(u * ew, -eh * Math.sqrt(1 - u * u) * 0.9)); } for (let i = 8; i >= 0; i--) { const u = -1 + 2 * i / 8; lens.push(EP(u * ew, eh * 0.7 * Math.sqrt(1 - u * u))); }
+    fillPoly(c, lens, 'rgba(0,0,0,0.22)');
+    const pu = EP(-ew * 0.25, 0); c.fillStyle = 'rgba(0,0,0,0.92)'; c.beginPath(); c.ellipse(pu[0], pu[1], Math.max(0.5, 0.0065 * wpx(1)), Math.max(0.4, 0.0085 * wpx(1) * open), 0, 0, TAU); c.fill();
+    const hl = EP(-ew * 0.32, -eh * 0.3); c.fillStyle = 'rgba(255,255,255,0.95)'; c.beginPath(); c.arc(hl[0], hl[1], Math.max(0.3, 0.0022 * wpx(1)), 0, TAU); c.fill();
+  }
+  const lid = []; for (let i = 0; i <= 6; i++) { const u = 1 - 2 * i / 6; lid.push(EP(u * ew * 1.08, -eh * Math.sqrt(Math.max(0, 1 - u * u)) - 0.002)); }
+  brush(c, lid, { w: wpx(0.006), prof: PROF.press, a: 0.95, seed: 94 });
+  if (open > 0.15) brush(c, [EP(ew, 0.002), EP(0, eh * 0.75), EP(-ew, 0.001)], { w: wpx(0.003), prof: PROF.swell, a: 0.55, seed: 95 });
+  // 무늬: 눈썹 위, 눈꼬리, 이마, 볼
+  brush(c, [H(0.11, 0.072), H(0.075, 0.084), H(0.035, 0.078)], { w: wpx(0.008), prof: PROF.swell, a: 0.9, seed: 96 });
+  brush(c, [H(0.052, 0.042), H(0.0, 0.028), H(-0.05, 0.0)], { w: wpx(0.009), prof: PROF.swell, a: 0.88, seed: 97 });
+  for (const [x, y, l] of [[0.0, 0.117, 0.025], [0.03, 0.12, 0.02], [-0.03, 0.112, 0.022]]) brush(c, [H(x, y), H(x - 0.004, y - l)], { w: wpx(0.006), prof: PROF.swell, a: 0.85, seed: 98 + x * 100 });
+  for (const [a0, a1, w] of [[[0.04, -0.02], [-0.085, 0.002], 0.009], [[0.05, -0.055], [-0.095, -0.05], 0.01], [[0.0, -0.088], [-0.11, -0.09], 0.008]]) brush(c, [H(...a0), H((a0[0] + a1[0]) / 2, (a0[1] + a1[1]) / 2 + 0.006), H(...a1)], { w: wpx(w), prof: PROF.swell, a: 0.9, seed: 99 + w * 1000 });
+  for (let r = 0; r < 3; r++) for (let q = 0; q < 3; q++) { const p = H(0.148 + q * 0.017, -0.03 - r * 0.013); c.fillStyle = 'rgba(0,0,0,0.6)'; c.beginPath(); c.arc(p[0], p[1], Math.max(0.35, 0.0022 * wpx(1)), 0, TAU); c.fill(); }
+  for (const [ex, ey] of [[0.33, -0.05], [0.31, -0.015], [0.3, -0.09], [0.27, -0.12]]) brush(c, [H(0.17, -0.045), H((0.17 + ex) / 2, (-0.045 + ey) / 2 - 0.005), H(ex + 0.02, ey - 0.015)], { w: wpx(0.0016), prof: PROF.tail, a: 0.32, seed: 101 + ex * 100 });
+}
+
+// ============================================================
+//  나그네 (갓, 흰 도포, 허리의 칼과 붉은 술)
+// ============================================================
+function drawTraveler(c, t, cam) {
+  const X = XM(t), v = samp(MT.V, t), w = windAt(t);
+  const bob = samp(TRS.bob, t), lean = 0.045 * Math.min(1, v) + 0.075 * w, hipY = 0.905 + bob;
+  const cl = Math.cos(lean), sl = Math.sin(lean);
+  const T = (a, b) => [X + a * cl + b * sl, hipY - a * sl + b * cl];
+  const S = (q, z = 0) => proj(cam, q[0], q[1], z), TP = (a, b, z = 0) => S(T(a, b), z);
+  const kz = z => F / (cam.D + z), wpx = (m, z = 0) => Math.max(0.55, m * kz(z));
+  const hemF = samp(TRS.hemF, t), hemB = samp(TRS.hemB, t) + 0.07 * Math.pow(w, 1.5) * vn1(t * 6.1 + 1.7);
+  const str = samp(TRS.str, t), tas = samp(TRS.tas, t), slv = samp(TRS.slv, t) + 0.05 * Math.pow(w, 1.5) * vn1(t * 7 + 5), sash = samp(TRS.sash, t);
+  // 다리
+  function leg(L) {
+    const f = footAt(L, t, XM); let beta;
+    if (f.s < 0) { const rel = clamp(f.rel, -1.3, 1.3); beta = 0.42 * sstep(-0.35, -1.0, rel) - 0.15 * sstep(0.55, 1.0, rel); }
+    else { const b0 = 0.42 * sstep(-0.35, -1.0, f.e.r0) - 0.15 * sstep(0.55, 1.0, f.e.r0), b1 = -0.15; beta = lerp(b0, b1, sstep(0, 0.8, f.s)) + 0.18 * Math.sin(Math.PI * f.s); }
+    const fx = f.x, fy = f.y, piv = beta > 0 ? [fx + 0.13, fy] : [fx - 0.09, fy], cs = Math.cos(-beta), sn = Math.sin(-beta);
+    const R = p => [piv[0] + (p[0] - piv[0]) * cs - (p[1] - piv[1]) * sn, piv[1] + (p[0] - piv[0]) * sn + (p[1] - piv[1]) * cs];
+    const ankle = R([fx - 0.04, fy + 0.075]), hip = [X, hipY], knee = ik2(hip, ankle, 0.44, 0.44, 1);
+    const foot = [R([fx - 0.1, fy + 0.035]), R([fx - 0.095, fy]), R([fx + 0.06, fy - 0.002]), R([fx + 0.14, fy + 0.012]), R([fx + 0.12, fy + 0.04]), R([fx + 0.02, fy + 0.065])];
+    return { knee, ankle, foot, z: L.z };
+  }
+  const legs = [leg(MGAIT.legs[1]), leg(MGAIT.legs[0])];
+  legs.forEach((g, i) => {
+    const far = i === 0, z = g.z, n = lnorm(g.knee, g.ankle), m = mid(g.knee, g.ankle);
+    const poly = [ad(g.knee, n, 0.07), ad(m, n, 0.055), ad(g.ankle, n, 0.045), g.foot[4], g.foot[3], g.foot[2], g.foot[1], g.foot[0], ad(g.ankle, n, -0.05), ad(m, n, -0.068), ad(g.knee, n, -0.075)].map(q => S(q, z));
+    fillPoly(c, poly, far ? 'rgba(222,222,222,1)' : 'rgba(255,255,255,1)');
+    const fa = far ? 0.5 : 1;
+    brush(c, [poly[10], poly[9], poly[8]], { w: wpx(0.011, z), prof: PROF.nail, a: 0.85 * fa, br: 4, dry: 0.5, seed: far ? 201 : 211 });
+    brush(c, [poly[0], poly[1], poly[2]], { w: wpx(0.008, z), prof: PROF.press, a: 0.7 * fa, seed: far ? 202 : 212 });
+    for (let j = 0; j < 2; j++) { const a = 0.55 + j * 0.22, p0 = ad([lerp(g.knee[0], g.ankle[0], a), lerp(g.knee[1], g.ankle[1], a)], n, -0.06), p1 = ad([lerp(g.knee[0], g.ankle[0], a + 0.05), lerp(g.knee[1], g.ankle[1], a + 0.05)], n, 0.05); brush(c, [S(p0, z), S(p1, z)], { w: wpx(0.004, z), prof: PROF.swell, a: 0.45 * fa, seed: 220 + j }); }
+    const fp = g.foot.map(q => S(q, z)); fillPoly(c, fp, `rgba(0,0,0,${0.3 * fa})`);
+    brush(c, [fp[0], fp[1], fp[2], fp[3]], { w: wpx(0.012, z), prof: PROF.press, a: 0.85 * fa, seed: far ? 203 : 213 });
+    brush(c, [fp[3], fp[4], fp[5]], { w: wpx(0.008, z), prof: PROF.swell, a: 0.7 * fa, seed: far ? 204 : 214 });
+  });
+  // 도포
+  const hemY = 0.39, wave = j => 0.018 * Math.sin(t * 2.3 + j * 1.7) * (0.3 + w) + 0.025 * Math.pow(w, 1.5) * vn1(t * 8 + j * 3.1);
+  const front = [T(0.10, 0.62), T(0.17, 0.46), T(0.175, 0.2), T(0.2 + 0.4 * hemF, -0.15), T(0.25 + hemF, hemY - hipY)];
+  const back = [T(-0.31 + hemB, hemY - 0.02 - hipY + 0.06 * Math.max(0, -hemB - 0.15)), T(-0.22 + 0.5 * hemB, -0.12), T(-0.175, 0.18), T(-0.14, 0.47), T(-0.05, 0.645)];
+  // 앞으로 나간 무릎이 앞자락을 밀어낸다 (정강이가 자락 밖으로 튀어나오지 않게)
+  { const kx = Math.max(legs[0].knee[0], legs[1].knee[0]) + 0.09, push = Math.max(0, kx - front[4][0]);
+    front[4] = [front[4][0] + push, front[4][1] + 0.02 * Math.min(1, push / 0.1)]; front[3] = [front[3][0] + push * 0.75, front[3][1]]; front[2] = [front[2][0] + push * 0.2, front[2][1]]; }
+  const hem = []; for (let j = 1; j <= 3; j++) { const a = j / 4, fx = lerp(front[4][0], back[0][0], a), fy = lerp(front[4][1], back[0][1], a); hem.push([fx, fy + wave(j) - 0.012 * Math.sin(Math.PI * a)]); }
+  const robe = [...front, ...hem, ...back, T(0.03, 0.665)], rs = robe.map(q => S(q));
+  fillPoly(c, rs, 'rgba(255,255,255,1)');
+  { const a = TP(-0.16, 0.2), b = TP(0.12, 0.2); gradPoly(c, rs, a[0], a[1], b[0], b[1], [[0, 'rgba(0,0,0,0.17)'], [0.5, 'rgba(0,0,0,0.04)'], [1, 'rgba(0,0,0,0)']]); }
+  brush(c, front.map(q => S(q)), { w: wpx(0.017), prof: PROF.nail, a: 0.9, br: 5, dry: 0.45, seed: 231 });
+  brush(c, back.slice().reverse().map(q => S(q)), { w: wpx(0.019), prof: PROF.nail, a: 0.92, br: 6, dry: 0.5, seed: 232 });
+  brush(c, [front[4], ...hem, back[0]].map(q => S(q)), { w: wpx(0.009), prof: PROF.tail, a: 0.6, br: 4, dry: 0.65, seed: 233 });
+  brush(c, [TP(0.02, 0.0), TP(0.03 + 0.2 * hemF, -0.3), S(hem[0])], { w: wpx(0.006), prof: PROF.tail, a: 0.45, seed: 234 });
+  brush(c, [TP(-0.06, 0.05), TP(-0.09 + 0.3 * hemB, -0.28), S(hem[2])], { w: wpx(0.006), prof: PROF.tail, a: 0.42, seed: 235 });
+  brush(c, [TP(0.1, 0.62), TP(0.06, 0.5), TP(0.04, 0.42)], { w: wpx(0.008), prof: PROF.press, a: 0.75, seed: 236 });
+  // 세조대 끈
+  for (let j = 0; j < 2; j++) { const a0 = T(0.14, 0.4), an = sash * (1 + j * 0.25) + 0.25 * Math.pow(w, 1.4) * vn1(t * 6.7 + j * 4); const p1 = [a0[0] - Math.sin(an * 0.6) * 0.17, a0[1] - Math.cos(an * 0.6) * 0.17], p2 = [p1[0] - Math.sin(an) * 0.17, p1[1] - Math.cos(an) * 0.17]; brush(c, [S(a0), S(p1), S(p2)], { w: wpx(0.005), prof: PROF.even, a: 0.65, seed: 240 + j }); }
+  brush(c, [TP(-0.13, 0.41), TP(0.0, 0.395), TP(0.15, 0.4)], { w: wpx(0.006), prof: PROF.even, a: 0.6, seed: 242 });
+  // 칼집
+  const mouth = T(0.07, 0.0), endS = T(-0.6, -0.21), pommel = T(0.33, 0.085), guard = T(0.1, 0.012);
+  brush(c, [S(mouth), S(T(-0.25, -0.1)), S(endS)], { w: wpx(0.026), prof: s => 1 - 0.25 * s, a: 0.9, br: 5, dry: 0.3, seed: 251 });
+  for (const a of [0.15, 0.85]) { const p = [lerp(mouth[0], endS[0], a), lerp(mouth[1], endS[1], a)], n = lnorm(mouth, endS); brush(c, [S(ad(p, n, 0.03)), S(ad(p, n, -0.03))], { w: wpx(0.008), prof: PROF.even, a: 0.95, seed: 252 + a }); }
+  // 소매
+  const sleeve = [T(-0.03, 0.55), T(0.07, 0.27), T(0.19, 0.12), T(0.16 + slv, -0.16), T(0.04 + slv, -0.2), T(-0.09 + slv * 0.9, -0.12), T(-0.13 + slv * 0.4, 0.12), T(-0.09, 0.38)], ss = sleeve.map(q => S(q));
+  fillPoly(c, ss, 'rgba(255,255,255,1)');
+  { const a = TP(0.0, 0.4), b = TP(0.0, -0.12); gradPoly(c, ss, a[0], a[1], b[0], b[1], [[0, 'rgba(0,0,0,0)'], [1, 'rgba(0,0,0,0.13)']]); }
+  brush(c, [ss[0], ss[1], ss[2]], { w: wpx(0.014), prof: PROF.nail, a: 0.88, br: 5, dry: 0.4, seed: 261 });
+  brush(c, [ss[2], ss[3], ss[4], ss[5], ss[6]], { w: wpx(0.012), prof: PROF.press, a: 0.75, br: 4, dry: 0.6, seed: 262 });
+  brush(c, [TP(0.02, 0.24), TP(-0.04, 0.05), TP(-0.02 + slv * 0.5, -0.06)], { w: wpx(0.005), prof: PROF.tail, a: 0.4, seed: 263 });
+  // 칼자루·손
+  brush(c, [S(guard), S(pommel)], { w: wpx(0.017), prof: PROF.even, a: 0.85, seed: 271 });
+  { const g = S(guard), n = lnorm(guard, pommel); brush(c, [S(ad(guard, n, 0.035)), S(ad(guard, n, -0.035))], { w: wpx(0.009), prof: PROF.even, a: 0.95, seed: 272 }); }
+  const hand = [T(0.15, 0.1), T(0.22, 0.105), T(0.235, 0.06), T(0.2, 0.035), T(0.15, 0.05)].map(q => S(q));
+  fillPoly(c, hand, 'rgba(255,255,255,1)'); brush(c, [hand[0], hand[1], hand[2], hand[3], hand[4]], { w: wpx(0.007), prof: PROF.press, a: 0.8, seed: 273 });
+  // 붉은 술 (유일한 색)
+  { const a1 = tas + 0.18 * Math.pow(w, 1.4) * vn1(t * 5.3), knot = [pommel[0] - Math.sin(a1) * 0.07, pommel[1] - Math.cos(a1) * 0.07];
+    brush(c, [S(pommel), S(knot)], { w: wpx(0.004), prof: PROF.even, a: 1, col: '200,20,16', seed: 281 });
+    c.fillStyle = 'rgba(190,18,14,1)'; const kp = S(knot); c.beginPath(); c.arc(kp[0], kp[1], wpx(0.011), 0, TAU); c.fill();
+    for (let j = 0; j < 7; j++) { const a2 = a1 * 1.15 + (j - 3) * 0.07 + 0.22 * Math.pow(w, 1.4) * vn1(t * 7.1 + j), l = 0.12 + 0.02 * Math.sin(j * 2.3), e = [knot[0] - Math.sin(a2) * l, knot[1] - Math.cos(a2) * l], m2 = [knot[0] - Math.sin(a2 * 0.8) * l * 0.5, knot[1] - Math.cos(a2 * 0.8) * l * 0.5]; brush(c, [kp, S(m2), S(e)], { w: wpx(0.0045), prof: PROF.tail, a: 0.95, col: '205,22,18', seed: 282 + j }); } }
+  // 머리·얼굴
+  const tilt = -lean * 0.6, Hd = T(0.075, 0.70), hc = Math.cos(tilt), hs = Math.sin(tilt), Hl = (x, y) => S([Hd[0] + x * hc - y * hs, Hd[1] + x * hs + y * hc]);
+  const face = [[-0.085, 0.04], [-0.095, -0.01], [-0.07, -0.09], [0.0, -0.13], [0.04, -0.11], [0.095, -0.088], [0.103, -0.062], [0.108, -0.05], [0.106, -0.036], [0.127, -0.016], [0.1, 0.015], [0.092, 0.05], [0.0, 0.07]].map(q => Hl(q[0], q[1]));
+  fillPoly(c, face, 'rgba(255,255,255,1)');
+  brush(c, [Hl(0.09, 0.05), Hl(0.1, 0.015), Hl(0.127, -0.016), Hl(0.106, -0.036)], { w: wpx(0.006), prof: PROF.press, a: 0.85, seed: 291 });
+  brush(c, [Hl(0.108, -0.05), Hl(0.1, -0.062)], { w: wpx(0.004), prof: PROF.swell, a: 0.7, seed: 292 });
+  for (let j = 0; j < 5; j++) brush(c, [Hl(0.098 - j * 0.012, -0.075 - j * 0.004), Hl(0.09 - j * 0.014 - 0.01 * w, -0.13 - j * 0.006)], { w: wpx(0.005), prof: PROF.tail, a: 0.75, seed: 293 + j });
+  brush(c, [Hl(0.103, -0.058), Hl(0.075, -0.064)], { w: wpx(0.004), prof: PROF.tail, a: 0.6, seed: 299 });
+  brush(c, [Hl(0.078, 0.012), Hl(0.06, 0.013)], { w: wpx(0.005), prof: PROF.swell, a: 0.9, seed: 300 });
+  brush(c, [Hl(0.0, 0.0), Hl(0.012, -0.03), Hl(0.0, -0.045)], { w: wpx(0.004), prof: PROF.swell, a: 0.55, seed: 301 });
+  brush(c, [Hl(-0.085, 0.04), Hl(-0.095, -0.01), Hl(-0.075, -0.085), Hl(-0.03, -0.12)], { w: wpx(0.006), prof: PROF.tail, a: 0.6, seed: 302 });
+  fillPoly(c, [Hl(-0.095, 0.055), Hl(0.095, 0.058), Hl(0.093, 0.035), Hl(-0.093, 0.03)], 'rgba(0,0,0,0.78)');
+  // 갓끈
+  { const tie = Hl(0.055, -0.115), a1 = str + 0.32 * Math.pow(w, 1.5) * vn1(t * 7.3) + 0.12 * w * vn1(t * 13.1 + 3), a2 = a1 * 1.25 + 0.3 * Math.pow(w, 1.5) * vn1(t * 9.7 + 8);
+    brush(c, [Hl(-0.02, 0.06), Hl(0.0, -0.03), Hl(0.04, -0.1), tie], { w: wpx(0.0035), prof: PROF.even, a: 0.8, seed: 311 });
+    for (let j = 0; j < 2; j++) { const b1 = a1 * (1 - j * 0.12), b2 = a2 * (1 - j * 0.15), tw = [Hd[0] + 0.055, Hd[1] - 0.115], p1 = [tw[0] - Math.sin(b1) * 0.12, tw[1] - Math.cos(b1) * 0.12], p2 = [p1[0] - Math.sin(b2) * 0.12, p1[1] - Math.cos(b2) * 0.12]; const pts = [tie, S(p1), S(p2)]; brush(c, pts, { w: wpx(0.0035), prof: PROF.even, a: 0.85, seed: 312 + j }); for (let q = 1; q <= 4; q++) { const u = q / 5, p = cr(pts, false, 6), pp = p[Math.min(p.length - 1, Math.round(u * (p.length - 1)))]; c.fillStyle = 'rgba(0,0,0,0.8)'; c.beginPath(); c.arc(pp[0], pp[1], wpx(0.006), 0, TAU); c.fill(); } } }
+  // 갓 (말총이라 비치는 양태와 대우)
+  { const bc = [-0.005, 0.07], rx = 0.29, el = Math.max(0.012, (cam.y - Hd[1]) / Math.hypot(cam.D, cam.y - Hd[1]) * rx * 0.55 + 0.012);
+    const brim = []; for (let i = 0; i < 24; i++) { const a = i / 24 * TAU; brim.push(Hl(bc[0] + Math.cos(a) * rx, bc[1] + Math.sin(a) * el)); }
+    fillPoly(c, brim, 'rgba(0,0,0,0.4)');
+    brush(c, [Hl(bc[0] - rx, bc[1]), Hl(bc[0] - rx * 0.4, bc[1] - el * 1.02), Hl(bc[0] + rx * 0.45, bc[1] - el), Hl(bc[0] + rx, bc[1] + 0.002)], { w: wpx(0.008), prof: PROF.press, a: 0.95, br: 4, dry: 0.3, seed: 321 });
+    brush(c, [Hl(bc[0] - rx * 0.95, bc[1] + el * 0.4), Hl(bc[0], bc[1] + el * 1.05), Hl(bc[0] + rx * 0.95, bc[1] + el * 0.35)], { w: wpx(0.004), prof: PROF.swell, a: 0.6, seed: 322 });
+    const crown = [Hl(-0.095, 0.075), Hl(-0.085, 0.215), Hl(-0.06, 0.232), Hl(0.06, 0.232), Hl(0.085, 0.215), Hl(0.095, 0.075)];
+    fillPoly(c, crown, 'rgba(0,0,0,0.5)');
+    fillPoly(c, [Hl(-0.035, 0.07), Hl(-0.03, 0.15), Hl(0.03, 0.155), Hl(0.04, 0.07)], 'rgba(0,0,0,0.3)');
+    brush(c, [crown[0], crown[1], crown[2], crown[3], crown[4], crown[5]], { w: wpx(0.007), prof: PROF.press, a: 0.95, seed: 323 });
+  }
+}
+
+// ============================================================
+//  낙관 (山行 — 백문인)
+// ============================================================
+function makeSeal() {
+  const S = 160, cv = mkcv(S, S), c = cv.getContext('2d'), R = rng(77);
+  c.fillStyle = 'rgb(255,0,0)'; const edge = []; for (let i = 0; i < 40; i++) { const a = i / 40 * TAU, sq = 1 / Math.max(Math.abs(Math.cos(a)), Math.abs(Math.sin(a))); edge.push([S / 2 + Math.cos(a) * sq * S * 0.46 * (1 + 0.012 * (R() - 0.5)), S / 2 + Math.sin(a) * sq * S * 0.46 * (1 + 0.012 * (R() - 0.5))]); }
+  polyPath(c, edge, true, false); c.fill();
+  c.globalCompositeOperation = 'destination-out'; c.lineCap = 'round'; c.lineJoin = 'round'; c.lineWidth = S * 0.068; c.strokeStyle = '#000';
+  const ln = (pts, off) => { c.beginPath(); pts.forEach((p, i) => { const x = off + p[0] * S * 0.4, y = S * 0.1 + p[1] * S * 0.8; i ? c.lineTo(x + (R() - 0.5), y + (R() - 0.5)) : c.moveTo(x, y); }); c.stroke(); };
+  // 오른쪽 줄: 山
+  const r = S * 0.53; ln([[0.5, 0.08], [0.5, 0.86]], r); ln([[0.12, 0.38], [0.12, 0.86], [0.88, 0.86], [0.88, 0.38]], r);
+  // 왼쪽 줄: 行
+  const l = S * 0.07; ln([[0.42, 0.08], [0.1, 0.3]], l); ln([[0.45, 0.32], [0.08, 0.58]], l); ln([[0.3, 0.46], [0.3, 0.92]], l); ln([[0.55, 0.16], [0.95, 0.16]], l); ln([[0.55, 0.42], [0.95, 0.42]], l); ln([[0.78, 0.42], [0.78, 0.92], [0.64, 0.86]], l);
+  for (let i = 0; i < 70; i++) { c.lineWidth = 0.6 + R() * 1.8; c.beginPath(); const x = R() * S, y = R() * S; c.moveTo(x, y); c.lineTo(x + (R() - 0.5) * 6, y + (R() - 0.5) * 6); c.stroke(); }
+  return cv;
+}
+
+// ============================================================
+//  인물 레이어 그리기
+// ============================================================
+function drawChars(t, cam) {
+  const c = chC.ctx; c.setTransform(sc, 0, 0, sc, 0, 0); c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1; c.clearRect(0, 0, LW, LH);
+  if (t < 30.8) { drawTraveler(c, t, cam); drawTiger(c, t, cam); }
+  if (t > 31.6) {
+    const u = sstep(31.6, 31.78, t), s = 118 * (1.06 - 0.06 * u);
+    c.globalAlpha = u; c.drawImage(SEAL, 1708 - s / 2 + 59, 948 - s / 2, s, s); c.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+//  WebGL 합성: 한지, 번짐, 고인 테두리, 섬유 결, 눈, 눈보라
+// ============================================================
+const VS = 'attribute vec2 a;varying vec2 v;void main(){v=a*0.5+0.5;gl_Position=vec4(a,0.,1.);}';
+const FS = `precision highp float;
+varying vec2 v;
+uniform sampler2D tBg,tCh,tPa;
+uniform vec2 px;
+uniform float T,dis,bliz,chA,sc,camX,wind,snow;
+float h21(vec2 p){p=fract(p*vec2(233.34,851.73));p+=dot(p,p+23.45);return fract(p.x*p.y);}
+float vn(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(h21(i),h21(i+vec2(1,0)),f.x),mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),f.x),f.y);}
+float fb(vec2 p){float s=0.,a=.5;for(int i=0;i<5;i++){s+=a*vn(p);p=p*2.02+vec2(3.1,7.7);a*=.5;}return s/.97;}
+float flakes(vec2 uv,float cells,vec2 vel,float sz,float dens,float st){
+  vec2 p=uv*vec2(1.7778,1.)*cells+vel;vec2 id=floor(p),f=fract(p);float r=h21(id);
+  if(r>dens)return 0.;vec2 c=vec2(h21(id+7.1),h21(id+3.3))*.7+.15;c.x+=.1*sin(T*1.3+r*40.);
+  vec2 q=f-c;q.x/=st;return smoothstep(sz,sz*.25,length(q));}
+void main(){
+  vec2 uv=v;
+  vec4 B=texture2D(tBg,uv);float d=B.a;
+  // 번질 시각은 농도 가중 평균으로 읽는다: 아주 옅은 가장자리 픽셀은 저장 과정에서 시각 값이 뭉개지기 때문
+  float b1=0.,b2=0.,tw=B.r*B.a*2.,ta=B.a*2.;
+  for(int i=0;i<8;i++){float an=float(i)*.7853982+.3;vec2 o=vec2(cos(an),sin(an))*px;vec4 q1=texture2D(tBg,uv+o*2.*sc),q2=texture2D(tBg,uv+o*6.5*sc);b1+=q1.a;b2+=q2.a;tw+=q1.r*q1.a+q2.r*q2.a;ta+=q1.a+q2.a;}
+  b1*=.125;b2*=.125;
+  float tr=ta>.0001?tw/ta*6.:B.r*6.;
+  float rim=max(0.,d-b1);
+  float n=fb(uv*vec2(1.7778,1.)*7.+vec2(4.2,1.3));
+  // 젖은 종이에 먹이 번지듯: 진한 곳부터 나타나고, 번지는 앞쪽에 먹이 고인다
+  float s=clamp((T-tr)/1.7,0.,1.);
+  float val=clamp(max(d,b2)*1.5,0.,1.)*.6+n*.5;
+  float thr=1.25-s*1.48;
+  float m=smoothstep(thr-.02,thr+.05,val);
+  float front=m*(1.-smoothstep(0.,.1,val-thr))*(1.-s*s);
+  float crisp=smoothstep(.15,.95,s);
+  float dd=mix(max(d,b2*.9),d,crisp)*m+front*.2*smoothstep(0.,.05,b2)+rim*1.1*crisp*m;
+  float thrD=dis*1.35-.18;
+  dd*=smoothstep(thrD-.03,thrD+.06,val);
+  vec4 P=texture2D(tPa,uv);vec3 paper=P.rgb;float fib=P.a;
+  dd*=1.-.22*fib;
+  vec3 ink=vec3(.072,.068,.066);
+  vec3 col=mix(paper,ink+vec3(-.01,0.,.02)*(1.-dd),clamp(dd,0.,1.));
+  vec4 C=texture2D(tCh,uv);
+  float c1=0.;
+  for(int i=0;i<6;i++){float an=float(i)*1.0472;vec4 q=texture2D(tCh,uv+vec2(cos(an),sin(an))*px*1.8*sc);c1+=q.a*(1.-q.r);}
+  float cden=C.a*(1.-C.r),crim=max(0.,cden-c1/6.);
+  float dark=clamp((1.-C.r)*(1.-.16*fib)+crim*.9,0.,1.);
+  float red=clamp(C.r-C.g,0.,1.);
+  vec3 cc=mix(paper,ink,dark);
+  cc=mix(cc,vec3(.69,.16,.11)*mix(.8,1.03,P.r),red*mix(.82,1.,fib));
+  col=mix(col,cc,clamp(C.a*chA,0.,1.));
+  // 눈보라 장막 (연속 잡음이라 세로 이음새가 없다)
+  float vl=fb(vec2(uv.x*1.5+T*.5*(.3+bliz*1.6)+camX*.01,uv.y*4.2+.3*sin(uv.x*3.+T*.4)));
+  float veil=smoothstep(.4,.78,vl)*bliz*.85+bliz*.18;
+  col=mix(col,paper*1.012,clamp(veil,0.,.96));
+  // 눈송이 (호분처럼 종이보다 살짝 밝다)
+  float wx=T*(.05+.9*wind)+camX*.004, sf=0.;
+  float st=1.+bliz*2.5;
+  sf+=flakes(uv,34.,vec2(wx*34.*.5,T*.35*1.4),.06,.22*snow+.45*bliz,st)*.5;
+  sf+=flakes(uv,18.,vec2(wx*18.*.8,T*.5*1.2)+3.3,.06,.2*snow+.35*bliz,st)*.7;
+  sf+=flakes(uv,9.,vec2(wx*9.*1.3,T*.45)+9.1,.045,.12*snow+.15*bliz,1.+bliz*1.5)*.85;
+  col=mix(col,vec3(.99,.985,.975),clamp(sf,0.,1.)*.85);
+  vec2 q=(uv-.5)*vec2(1.,.9);col*=1.-.075*pow(clamp(length(q)*1.45,0.,1.),2.5);
+  gl_FragColor=vec4(col,1.);
+}`;
+let gl, prog, U = {}, texBg, texCh, texPa, RW = 1600, RH = 900;
+function initGL(canvas) {
+  gl = canvas.getContext('webgl', { antialias: false, alpha: false, premultipliedAlpha: false, preserveDrawingBuffer: true });
+  if (!gl) throw new Error('WebGL을 사용할 수 없습니다.');
+  const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+  prog = gl.createProgram(); gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS)); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'a'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  for (const n of ['tBg', 'tCh', 'tPa', 'px', 'T', 'dis', 'bliz', 'chA', 'sc', 'camX', 'wind', 'snow']) U[n] = gl.getUniformLocation(prog, n);
+  const mk = unit => { const t = gl.createTexture(); gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t); for (const [p, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, p, v); return t; };
+  texBg = mk(0); texCh = mk(1); texPa = mk(2);
+  gl.uniform1i(U.tBg, 0); gl.uniform1i(U.tCh, 1); gl.uniform1i(U.tPa, 2);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+}
+function setSize(w) {
+  RW = Math.round(w); RH = Math.round(w * 9 / 16); sc = RW / LW;
+  view.width = RW; view.height = RH; gl.viewport(0, 0, RW, RH);
+  const mkLayer = () => { const cv = mkcv(RW, RH); return { cv, ctx: cv.getContext('2d') }; };
+  bgC = mkLayer(); chC = mkLayer();
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, texPa); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, makePaper(RW, RH));
+}
+function composite(t, cam) {
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texBg); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bgC.cv);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texCh); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, chC.cv);
+  gl.uniform2f(U.px, 1 / RW, 1 / RH); gl.uniform1f(U.T, t); gl.uniform1f(U.sc, sc);
+  gl.uniform1f(U.dis, sstep(29.8, 31.5, t)); gl.uniform1f(U.bliz, blizAt(t));
+  gl.uniform1f(U.chA, t > 30.8 ? 1 : sstep(2.4, 3.9, t) * (1 - sstep(29.2, 30.6, t)));
+  gl.uniform1f(U.camX, cam.x); gl.uniform1f(U.wind, windAt(t)); gl.uniform1f(U.snow, sstep(1.0, 4.0, t) * (1 - sstep(30.0, 31.2, t)));
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+}
+function renderAt(t) { t = clamp(t, 0, DUR); const cam = camAt(t); drawBG(t, cam); drawChars(t, cam); composite(t, cam); }
+
+// ============================================================
+//  소리: 바람, 눈 밟는 소리, 호랑이 숨, 대금풍 선율, 뜯는 현 — 모두 직접 합성
+// ============================================================
+function synthAudio(sr) {
+  const N = Math.ceil(sr * (DUR + 0.5)), L = new Float32Array(N), Rr = new Float32Array(N), WL = new Float32Array(N), WR = new Float32Array(N);
+  const rnd = rng(9001), nz = () => rnd() * 2 - 1;
+  const put = (i, s, pan, send) => { if (i < 0 || i >= N) return; const l = Math.cos((pan + 1) * Math.PI / 4), r = Math.sin((pan + 1) * Math.PI / 4); L[i] += s * l; Rr[i] += s * r; WL[i] += s * l * send; WR[i] += s * r * send; };
+  const svf = () => ({ lo: 0, bp: 0 }), svfRun = (st, x, fc, q) => { const f = 2 * Math.sin(Math.PI * Math.min(fc, sr / 6) / sr); st.lo += f * st.bp; const hi = x - st.lo - q * st.bp; st.bp += f * hi; return st; };
+  // 바람
+  { const a = [svf(), svf()], b = [svf(), svf()];
+    for (let i = 0; i < N; i++) { const t = i / sr, w = windAt(Math.min(t, DUR)), g = sstep(0, 2.5, t) * (1 - 0.7 * sstep(31, 33, t));
+      for (let ch = 0; ch < 2; ch++) { const x = nz();
+        svfRun(a[ch], x, 260 + 260 * w + 60 * vn1(t * 0.4 + ch), 1.2); svfRun(b[ch], x, 650 + 900 * w + 260 * vn1(t * 0.31 + ch * 5), 0.22);
+        const s = g * ((0.05 + 0.2 * Math.pow(w, 1.4)) * a[ch].bp * (0.75 + 0.25 * vn1(t * 0.8 + ch * 3)) + 0.06 * Math.pow(w, 2) * b[ch].bp * (0.6 + 0.4 * vn1(t * 1.7 + ch)));
+        (ch ? Rr : L)[i] += s; (ch ? WR : WL)[i] += s * 0.25; } } }
+  // 발소리
+  const closeAt = t => clamp(4.2 / camAt(t).D, 0.1, 1.15);
+  const panAt = (t, x) => clamp((proj(camAt(t), x, 0, 0)[0] - 960) / 960 * 0.7, -0.85, 0.85);
+  const steps = (gait, kind) => gait.legs.forEach(Lg => Lg.ev.forEach(e => {
+    const t = e.t1; if (t < 0.3 || t > DUR - 0.2) return;
+    const i0 = Math.round(t * sr), g = closeAt(t) * (kind === 'T' ? 0.12 : 0.2) * (Lg.z > 0 ? 0.75 : 1) * sstep(1.5, 3.5, t), pan = panAt(t, e.x1);
+    const st = svf(), st2 = svf(), len = Math.round(sr * (kind === 'T' ? 0.13 : 0.22));
+    const grains = []; const ng = kind === 'T' ? 4 : 14; for (let k = 0; k < ng; k++) grains.push([Math.round(Math.pow(rnd(), 1.7) * len * 0.75), 0.4 + rnd() * 0.6, Math.round(sr * (0.002 + rnd() * 0.005))]);
+    for (let j = 0; j < len; j++) { const tt = j / sr, env = Math.min(1, tt / 0.004) * Math.exp(-tt / (kind === 'T' ? 0.035 : 0.05));
+      let s = svfRun(st, nz(), kind === 'T' ? 700 : 1100, 1.0).lo * env * (kind === 'T' ? 1.2 : 0.7);
+      if (kind === 'T') s += Math.sin(TAU * 85 * tt) * Math.exp(-tt / 0.03) * 0.5;
+      for (const [o, a, d] of grains) if (j >= o && j < o + d) s += svfRun(st2, nz(), 2600, 0.6).bp * a * (1 - (j - o) / d) * (kind === 'T' ? 0.5 : 1.1);
+      put(i0 + j, s * g, pan, 0.12); } }));
+  steps(TGAIT, 'T'); steps(MGAIT, 'M');
+  // 호랑이 숨
+  const breath = (t0, dur, gain, f0, f1, pan) => { const st = svf(), i0 = Math.round(t0 * sr), n = Math.round(dur * sr);
+    for (let j = 0; j < n; j++) { const u = j / n, env = Math.min(1, u / 0.07) * Math.pow(1 - u, 1.6); svfRun(st, nz(), lerp(f0, f1, u), 0.9);
+      const s = (st.lo * 0.9 + st.bp * 0.5) * env * gain + Math.sin(TAU * (62 + 8 * u) * j / sr) * env * gain * 0.12 * (0.5 + 0.5 * nz()); put(i0 + j, s, pan, 0.25); } };
+  breath(16.2, 0.55, 0.14, 500, 380, 0.45); breath(16.85, 1.35, 0.55, 950, 320, 0.45);
+  breath(19.7, 0.9, 0.18, 700, 300, 0.4); breath(21.65, 0.22, 0.38, 1100, 500, 0.4); breath(21.95, 0.28, 0.32, 1000, 450, 0.4); breath(24.7, 0.8, 0.14, 700, 300, 0.4);
+  // 대금풍 선율 (계면조, 농음과 꺾는 소리)
+  const keys = (ks, t) => { if (t <= ks[0][0]) return ks[0][1]; for (let i = 1; i < ks.length; i++) if (t <= ks[i][0]) { const a = ks[i - 1], b = ks[i]; return lerp(a[1], b[1], sstep(a[0], b[0], t)); } return ks[ks.length - 1][1]; };
+  const phrases = [
+    { p: [[2.6, 64], [3.0, 69], [5.15, 69], [5.35, 71], [6.0, 71], [6.2, 72], [6.35, 69], [6.5, 67], [9.4, 67]], a: [[2.6, 0], [3.2, 0.5], [5.2, 0.6], [5.6, 0.65], [6.3, 0.5], [7.6, 0.42], [9.3, 0]] },
+    { p: [[10.6, 76], [10.75, 74], [12.4, 74], [12.6, 71], [13.8, 71], [14.0, 69], [15.0, 69], [15.7, 67.4]], a: [[10.6, 0], [11.0, 0.55], [12.4, 0.6], [13.8, 0.5], [15.0, 0.42], [15.75, 0]] },
+    { p: [[21.9, 63.6], [22.1, 64], [23.6, 64], [23.85, 67], [24.6, 67], [24.85, 69], [25.9, 69], [26.1, 67], [26.8, 67]], a: [[21.9, 0], [22.6, 0.38], [23.6, 0.42], [24.85, 0.5], [25.9, 0.42], [26.8, 0]] },
+    { p: [[27.8, 68], [28.0, 69], [29.2, 69], [29.4, 67], [30.0, 67], [30.2, 64], [31.8, 63.8]], a: [[27.8, 0], [28.2, 0.45], [29.2, 0.5], [30.2, 0.42], [31.0, 0.3], [31.85, 0]] }];
+  for (const ph of phrases) { const t0 = ph.a[0][0], t1 = ph.a[ph.a.length - 1][0], st = svf(), air = svf(); let phase = 0, last = ph.p[0][1], lastT = t0;
+    for (let i = Math.round(t0 * sr); i < Math.round(t1 * sr); i++) { const t = i / sr; let m = keys(ph.p, t); if (Math.abs(m - last) > 0.4) { last = m; lastT = t; }
+      const vib = 0.28 * sstep(0.35, 1.3, t - lastT) * Math.sin(TAU * 4.4 * t + 0.3 * vn1(t)) + 0.05 * vn1(t * 2.1);
+      const f = 440 * Math.pow(2, (m + vib - 69) / 12); phase += f / sr; const a = keys(ph.a, t);
+      const tone = Math.sin(TAU * phase) + 0.3 * Math.sin(2 * TAU * phase + 0.3) + 0.13 * Math.sin(3 * TAU * phase + 1.1) + 0.05 * Math.sin(4 * TAU * phase);
+      svfRun(st, nz(), f, 0.35); svfRun(air, nz(), 4200, 0.7);
+      const s = a * (tone * 0.5 + st.bp * 0.55 + air.bp * 0.05) * (1 + 0.1 * vn1(t * 7)) * 0.11;
+      put(i, s, 0.15, 0.55); } }
+  // 뜯는 현 (Karplus-Strong + 농현)
+  const pluck = (t0, midi, gain, bend = 0) => { const f = 440 * Math.pow(2, (midi - 69) / 12), n = Math.max(2, Math.round(sr / f)), buf = new Float32Array(n), len = Math.round(sr * 3.8), out = new Float32Array(len);
+    let pv = 0; for (let k = 0; k < n; k++) { pv = pv * 0.55 + nz() * 0.45; buf[k] = pv; }
+    for (let j = 0; j < len; j++) { const a = j % n, b = (j + 1) % n; out[j] = buf[a]; buf[a] = 0.5 * (buf[a] + buf[b]) * 0.9975; }
+    const i0 = Math.round(t0 * sr), st = svf(); let pos = 0;
+    for (let j = 0; j < len - 2; j++) { const tt = j / sr, rate = 1 + bend * (sstep(0.35, 0.7, tt) - sstep(1.3, 1.8, tt) * 0.6) * 0.06; pos += rate; const p = Math.min(len - 2, pos), q = p | 0, u = p - q; let s = (out[q] * (1 - u) + out[q + 1] * u) * Math.exp(-tt / 1.6);
+      if (j < sr * 0.02) s += svfRun(st, nz(), 1800, 0.8).bp * (1 - j / (sr * 0.02)) * 0.6;
+      put(i0 + j, s * gain, -0.2, 0.45); } };
+  for (const [t, m, g, b] of [[1.0, 52, 0.16, 0], [4.4, 47, 0.12, 0], [7.2, 57, 0.11, 1], [10.2, 52, 0.12, 0], [13.6, 50, 0.1, 1], [18.6, 52, 0.08, 0], [20.8, 59, 0.07, 0], [27.3, 57, 0.1, 1], [29.6, 55, 0.08, 0], [31.72, 40, 0.2, 0], [31.74, 52, 0.08, 0]]) pluck(t, m, g, b);
+  // 낙관 찍는 소리
+  { const st = svf(), i0 = Math.round(31.66 * sr); for (let j = 0; j < sr * 0.18; j++) { const tt = j / sr; svfRun(st, nz(), 160, 1); put(i0 + j, st.lo * Math.exp(-tt / 0.04) * 0.5, 0.6, 0.1); } }
+  let pk = 0; for (let i = 0; i < N; i++) pk = Math.max(pk, Math.abs(L[i]), Math.abs(Rr[i]));
+  const g = 0.7 / (pk || 1); for (let i = 0; i < N; i++) { L[i] *= g; Rr[i] *= g; WL[i] *= g; WR[i] *= g; }
+  // 잔향 임펄스
+  const IRn = Math.round(sr * 3.2), IR = [new Float32Array(IRn), new Float32Array(IRn)];
+  for (let ch = 0; ch < 2; ch++) { let lp = 0; for (let j = 0; j < IRn; j++) { const tt = j / sr; const k = 0.5 + 0.45 * Math.min(1, tt / 1.5); lp = lp * k + nz() * (1 - k); IR[ch][j] = tt < 0.025 ? 0 : lp * Math.exp(-tt / 0.8) * 2.2; } }
+  return { L, R: Rr, WL, WR, IR, sr, peak: pk };
+}
+
+// ============================================================
+//  준비·재생
+// ============================================================
+const view = document.getElementById('view'), ui = document.getElementById('ui'), btn = document.getElementById('play'), again = document.getElementById('again'), err = document.getElementById('err');
+const tick = () => new Promise(r => setTimeout(r, 0));
+let AUD = null, actx = null, startAt = 0, playing = false, raf = 0;
+async function build() {
+  initGL(view);
+  const want = Q.has('w') ? +Q.get('w') : Math.min(1920, Math.round(view.parentElement.clientWidth * (window.devicePixelRatio || 1)) || 1600);
+  setSize(clamp(want, 640, 1920)); await tick();
+  FAR = makeRange({ seed: 11, z: 2500, ppm: 0.42, x0: -2700, x1: 2700, top: 1350, ink: 0.95, f0: 0.45, f1: 0.95, t0: 0.4, t1: 2.6,
+    sky: { a: 0.2, b: 0.06, fall: 230, nx: 420, ny: 260 },
+    masses: [{ x: -1750, h: 520, w: 700, f0: 0.35, f1: 0.85 }, { x: -480, h: 820, w: 640, f0: 0.4, f1: 0.9 }, { x: 820, h: 600, w: 640, f0: 0.35, f1: 0.85 }, { x: 1900, h: 700, w: 700, f0: 0.4, f1: 0.9 }, { x: -1050, h: 380, w: 520, f0: 0.22, f1: 0.7 }, { x: 260, h: 330, w: 520, f0: 0.22, f1: 0.7 }, { x: 1350, h: 400, w: 500, f0: 0.22, f1: 0.7 }] }); await tick();
+  const mm = []; { const r = rng(31); for (let x = -700; x < 760; x += 170 + r() * 160) mm.push({ x, h: 60 + r() * 100, w: 130 + r() * 120, f: 1.2 + 0.5 * r(), j: 0.06 }); mm.sort((a, b) => b.h - a.h); }
+  MIDR = makeRange({ seed: 23, z: 600, ppm: 1.7, x0: -780, x1: 800, top: 210, ink: 1.15, f0: 0.18, f1: 0.62, t0: 1.0, t1: 3.2, masses: mm, dots: { n: 90, r: 1.3, spread: 8, dep: 6 } }); await tick();
+  const rr = []; { const r = rng(41); for (let x = -195; x < 230; x += 30 + r() * 34) rr.push({ x, h: 6 + r() * 10, w: 26 + r() * 24, p: 0.85, j: 0.03, f: 1.0 }); rr.sort((a, b) => b.h - a.h); }
+  RIDGE = makeRange({ seed: 37, z: 150, ppm: 6.6, x0: -200, x1: 235, top: 26, ink: 0.75, f0: 0.15, f1: 0.62, t0: 1.6, t1: 3.8, masses: rr, dots: { n: 80, r: 2.6, spread: 26, dep: 1.2 } }); await tick();
+  for (let v = 0; v < 5; v++) { PINE_SPR.push(makePine(500 + v * 17, 7 + v * 0.7, 62, 2.2, 4.4)); await tick(); }
+  { const r = rng(61); let x = -80; while (x < 100) { if (x < 4 || x > 27) PINES.push({ x, v: (r() * 5) | 0, s: 0.85 + 0.35 * r(), flip: r() < 0.5 }); x += 7 + r() * 9; if (x >= 4 && x <= 27) x = 27.5 + r() * 3; } }
+  BOUGH = makeBough(); MISTS = [makeMist(1), makeMist(2), makeMist(3), makeMist(4)]; SEAL = makeSeal(); await tick();
+  AUD = synthAudio(48000);
+}
+function frame() {
+  if (!playing) return;
+  let t = actx ? actx.currentTime - startAt - (actx.outputLatency || 0) : (performance.now() - startAt) / 1000;
+  renderAt(Math.max(0, t));
+  if (t >= DUR) { playing = false; again.classList.add('show'); return; }
+  raf = requestAnimationFrame(frame);
+}
+function play() {
+  cancelAnimationFrame(raf); again.classList.remove('show');
+  try {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+    const mkBuf = (a, b) => { const bf = actx.createBuffer(2, a.length, AUD.sr); bf.copyToChannel(a, 0); bf.copyToChannel(b, 1); return bf; };
+    const dry = actx.createBufferSource(), wet = actx.createBufferSource(), conv = actx.createConvolver(), wg = actx.createGain(), comp = actx.createDynamicsCompressor();
+    dry.buffer = mkBuf(AUD.L, AUD.R); wet.buffer = mkBuf(AUD.WL, AUD.WR); conv.normalize = true; conv.buffer = mkBuf(AUD.IR[0], AUD.IR[1]); wg.gain.value = 0.55;
+    comp.threshold.value = -14; comp.knee.value = 6; comp.ratio.value = 8; comp.attack.value = 0.002; comp.release.value = 0.25; const mg = actx.createGain(); mg.gain.value = 1.35;
+    dry.connect(mg); wet.connect(conv); conv.connect(wg); wg.connect(mg); mg.connect(comp); comp.connect(actx.destination);
+    actx.resume(); startAt = actx.currentTime + 0.15; dry.start(startAt); wet.start(startAt);
+  } catch (e) { actx = null; startAt = performance.now() + 150; }
+  playing = true; ui.classList.add('hide'); raf = requestAnimationFrame(frame);
+}
+function wavBlob() {
+  // 영상 제작용: 잔향까지 섞은 스테레오 WAV (OfflineAudioContext)
+  const sr = AUD.sr, n = AUD.L.length, oc = new OfflineAudioContext(2, n, sr);
+  const mk = (a, b) => { const bf = oc.createBuffer(2, n, sr); bf.copyToChannel(a, 0); bf.copyToChannel(b, 1); return bf; };
+  const dry = oc.createBufferSource(), wet = oc.createBufferSource(), conv = oc.createConvolver(), wg = oc.createGain(), comp = oc.createDynamicsCompressor();
+  dry.buffer = mk(AUD.L, AUD.R); wet.buffer = mk(AUD.WL, AUD.WR); const ir = oc.createBuffer(2, AUD.IR[0].length, sr); ir.copyToChannel(AUD.IR[0], 0); ir.copyToChannel(AUD.IR[1], 1); conv.normalize = true; conv.buffer = ir; wg.gain.value = 0.55;
+  comp.threshold.value = -14; comp.knee.value = 6; comp.ratio.value = 8; comp.attack.value = 0.002; comp.release.value = 0.25; const mg = oc.createGain(); mg.gain.value = 1.35;
+  dry.connect(mg); wet.connect(conv); conv.connect(wg); wg.connect(mg); mg.connect(comp); comp.connect(oc.destination); dry.start(0); wet.start(0);
+  return oc.startRendering().then(buf => {
+    const ch = [buf.getChannelData(0), buf.getChannelData(1)], len = buf.length, ab = new ArrayBuffer(44 + len * 4), dv = new DataView(ab);
+    const ws = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+    ws(0, 'RIFF'); dv.setUint32(4, 36 + len * 4, true); ws(8, 'WAVE'); ws(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 2, true); dv.setUint32(24, sr, true); dv.setUint32(28, sr * 4, true); dv.setUint16(32, 4, true); dv.setUint16(34, 16, true); ws(36, 'data'); dv.setUint32(40, len * 4, true);
+    let pk = 0; for (let i = 0; i < len; i++) { for (let c2 = 0; c2 < 2; c2++) { const s = clamp(ch[c2][i], -1, 1); pk = Math.max(pk, Math.abs(ch[c2][i])); dv.setInt16(44 + (i * 2 + c2) * 2, s * 32767, true); } }
+    return { blob: new Blob([ab], { type: 'audio/wav' }), peak: pk };
+  });
+}
+window.SEOL = { DUR, renderAt, camAt, tigerPose, wavBlob, get audio() { return AUD; }, info: () => ({ T_STOP, M_STOP, MED_X, RW, RH, prints: PRINTS.length }) };
+window.SEOL.ready = build().then(() => {
+  btn.disabled = false; btn.textContent = '▶ 감상하기';
+  if (Q.has('t')) { ui.classList.add('hide'); renderAt(+Q.get('t')); } else renderAt(0);
+}).catch(e => { console.error(e); err.textContent = '이 브라우저에서는 그림을 펼칠 수 없습니다: ' + e.message; btn.textContent = '재생 불가'; throw e; });
+btn.addEventListener('click', play); again.addEventListener('click', play);
+document.addEventListener('keydown', e => { if (e.code === 'Space' && !btn.disabled) { e.preventDefault(); if (!playing) play(); } });
+})();
+</script>
+</body>
+</html>

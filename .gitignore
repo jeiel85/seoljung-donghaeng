@@ -1,0 +1,6 @@
+node_modules/
+frames/
+share/
+*.wav
+.DS_Store
+Thumbs.db
