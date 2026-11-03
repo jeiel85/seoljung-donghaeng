@@ -192,7 +192,7 @@ function windAt(t) {
   w += 0.6 * sstep(28.4, 30.0, t);
   return clamp(w, 0, 1.1);
 }
-const blizAt = t => clamp(0.8 * sstep(22.4, 23.7, t) * (1 - sstep(25.6, 27.0, t)) + 0.95 * sstep(28.6, 30.4, t), 0, 1);
+const blizAt = t => clamp(0.8 * sstep(22.4, 23.7, t) * (1 - sstep(25.6, 27.0, t)) + 0.95 * sstep(28.6, 30.4, t) * (1 - sstep(30.6, 31.6, t)), 0, 1);
 
 // ---------------- 보행: 발이 땅에 닿아 있는 동안 세계 좌표가 고정되는 스텝 시뮬레이션 ----------------
 function simGait(TR, cfg) {
